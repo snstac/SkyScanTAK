@@ -67,7 +67,7 @@ Inner shape (simplified):
 
 ### `<sensor>` FOV and related fields
 
-Both the mapping stream (`SENSOR_TYPE` on `<event>`, e.g. `b-m-p-s-p-e`) and the equipment stream (`COT_EQUIP_TYPE`, e.g. `a-f-G-E-S-E`) use the same **`<sensor>`** attribute set, aligned with the [CoT Sensor Schema](../takcot-master/mitre/CoT%20Sensor%20Schema%20%20(PUBLIC%20RELEASE).xsd):
+Both the mapping stream (`SENSOR_TYPE` on `<event>`, e.g. `b-m-p-s-p-e`) and the equipment stream (`COT_EQUIP_TYPE`, e.g. `a-f-G-E-S-E`) use the same **`<sensor>`** attribute set, aligned with the public-release **MITRE CoT Sensor Schema** (obtain the XSD from official TAK / MITRE CoT packages; it is not vendored in this repository):
 
 | Attribute | Source |
 |-----------|--------|
@@ -101,4 +101,4 @@ Point `COT_UDP_HOST` / `COT_UDP_PORT` in [`cot-bridge.env`](../../cot-bridge.env
 
 ## CoT schema reference
 
-See [`cot/takcot-master/mitre/CoT Sensor Schema  (PUBLIC RELEASE).xsd`](../takcot-master/mitre/CoT%20Sensor%20Schema%20%20(PUBLIC%20RELEASE).xsd) and the example event layout in [`cot/takcot-master/examples/Marker - Spot.cot`](../takcot-master/examples/Marker%20-%20Spot.cot).
+MITRE XSDs and sample `.cot` files are **not** stored in this repo (keeps the fork small). Use the **CoT Sensor** and **CoT Shape** public-release schemas from a TAK / ATAK distribution or [MITRE’s Cursor on Target publication hub](https://www.mitre.org/news-insights/publication/cursor-target). TAK-style drawing examples (e.g. free-form / spot markers) ship with ATAK / TAK developer materials.

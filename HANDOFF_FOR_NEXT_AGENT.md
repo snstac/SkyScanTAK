@@ -32,9 +32,9 @@ TAKX may ignore `<sensor>` FOV attributes; the **FOV polygon** is the TAK-friend
 
 FOV quad uses spherical-Earth geodesics, horizontal FOV vs zoom, `distance` from Logger when present, else `COT_FOV_DEFAULT_RANGE_M`.
 
-## Reference material under `cot/`
+## CoT schemas (not in git)
 
-[`cot/takcot-master/`](cot/takcot-master/) holds MITRE CoT XSDs and examples (large tree ~tens of MB). It is reference-only for schema alignment, not runtime for the bridge.
+The bridge follows MITRE CoT shapes in code only. **Do not vendor** `cot/takcot-master` in git (see `.gitignore`); fetch XSDs / examples from [MITRE / TAK CoT materials](https://www.mitre.org/news-insights/publication/cursor-target) or your TAK distribution if you need local validation.
 
 ## Deployment assumptions in this fork
 
@@ -51,4 +51,3 @@ The work described here was committed on branch `main`. Inspect history with `gi
 
 - Confirm TAKX renders both **`tak`** (`u-d-f`) and **`mitre`** FOV formats in your build; adjust defaults if only one works.
 - **Delete / stale** behavior when C2 sends empty Selected Object (air marker may age out via `stale` only).
-- If `cot/takcot-master` is too heavy for the main repo, consider a submodule or download script instead of vendoring.

@@ -66,7 +66,7 @@ Each of the modules in SkyScan can be configured via Environment variables. The 
 - The **DEPLOYMENT** is used to help describe where SkyScan is being deployed. There should be no spaces, use an `-` or `_` instead. This value is used to construct the MQTT Topics.
 - In order to determine **TRIPOD_LATITUDE** and **TRIPOD_LONGITUDE** use Google Maps, and right click on the tripod's location to copy the lat/long.  
 - The **TRIPOD_ALTITUDE** needs to be provided based on the WGS84 Ellipsoid, which is different than the barometric pressure based altitude you get from your phone. Start by getting your altitude based on barometric pressure using an App on your phone (make sure you convert from Feet to Meters). Then use this conversion web app to get that elevation in the WGS84 Ellipsoid: [https://www.unavco.org/software/geodetic-utilities/geoid-height-calculator/geoid-height-calculator.html](https://www.unavco.org/software/geodetic-utilities/geoid-height-calculator/geoid-height-calculator.html)
-- Initially leave **YAW**, **PITCH**, and **ROLL** at 0.0. Once the deployment is up and running you can adjust these values to compensate for the camera being un-level or not correctly pointing to True North.
+- Initially leave **TRIPOD_YAW**, **TRIPOD_PITCH**, and **TRIPOD_ROLL** at 0.0 (these are the environment names the Axis PTZ controller reads; older docs incorrectly called them YAW/PITCH/ROLL). Once the deployment is up and running you can adjust these values to compensate for the camera being un-level or not correctly pointing to True North.
 - The **ZOOM** value ranges from 0 which is the widest setting, to 9999, which is zoomed in all the way. Start with a low number initially until the deployment has been dialed in.
 - The Axis camera you will be using needs to be reachable from the server you are deploying SkyScan on. Complete **CAMERA_IP**, **CAMERA_USER**, and **CAMERA_PASSWORD** with the values for your camera. If you need help finding the IP address for the camera, the Linux `avahi-discover` command can help find Axis cameras on you network using Bonjour.
 - You should generally not need to change any of the MQTT Topic names.
@@ -91,6 +91,14 @@ After you have finished configuring the environment files, start everything up u
 docker compose pull
 docker compose up
 ```
+
+The compose file includes a **`cot-bridge`** service (built from [`cot/bridge`](cot/bridge)) that emits **Cursor on Target (CoT)** over UDP for map clients (e.g. TAK / TAKX). Configure **[`cot-bridge.env`](cot-bridge.env)** and see [`cot/bridge/README.md`](cot/bridge/README.md) for MQTT inputs, FOV polygon mode, and styling. Rebuild after code changes with `docker compose build cot-bridge && docker compose up -d cot-bridge`.
+
+## CoT bridge (TAK / TAKX)
+
+- **Env files:** `.env` (copy from [`skyscan.env`](skyscan.env)) supplies shared topics and tripod position; **[`cot-bridge.env`](cot-bridge.env)** supplies UDP destination, CoT identities, sensor/FOV/aircraft options.
+- **Outputs (same UDP socket):** PTZ mapping sensor (`SENSOR_TYPE`, default `b-m-p-s-p-e`); periodic equipment/sensor event (`COT_EQUIP_TYPE`); selected aircraft marker (`COT_AIR_TYPE`, e.g. `b-m-p-s-p-i`); **FOV ground polygon** (`u-d-f` by default) for clients that ignore `<sensor fov>` / `<sensor vfov>`.
+- **MQTT:** subscribes to **`LOGGER_TOPIC`** (camera pointing) and **`OBJECT_TOPIC`** (skyscan-c2 selected object) when aircraft CoT is enabled.
 
 After everything is up and running, goto the web interface for the camera to view what is being tracked.
 
@@ -238,7 +246,7 @@ The different EdgeTech modules used for SkyScan communicate with each other via 
             <td>LOGGER_TOPIC</td>
             <td>/skyscan/<i>DEPLOYMENT</i>/Logger/edgetech-axis-ptz-controller/JSON</td>
             <td>axis-ptz-controller</td>
-            <td></td>
+            <td>cot-bridge</td>
             <td>Logger</td>
         </tr>
         <tr>
@@ -259,7 +267,7 @@ The different EdgeTech modules used for SkyScan communicate with each other via 
             <td >OBJECT_TOPIC</td>
             <td >/skyscan/<i>DEPLOYMENT</i>/Object/skyscan-c2/JSON</td>
             <td>skyscan-c2</td>
-            <td>axis-ptz-controller</td>
+            <td>axis-ptz-controller, cot-bridge</td>
             <td >Selected Object</td>
         </tr>
         <tr>

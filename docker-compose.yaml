@@ -12,9 +12,10 @@ services:
     networks:
       - skyscan
     image: iqtlabs/edgetech-mqtt-dev:latest
+    # Host bindings: use 1884/9002 if 1883/9001 are already in use on the host
     ports:
-      - "1883:1883"
-      - "9001:9001"
+      - "1884:1883"
+      - "9002:9001"
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -46,31 +47,13 @@ services:
       - .env
       - axis-ptz-controller.env
 
-  piaware:
-    networks:
-      - skyscan
-    image: mikenye/piaware:v9.0.1
-    tty: true
-    container_name: piaware
-    devices:
-      - /dev/bus/usb:/dev/bus/usb
-    ports:
-      - 8080:80
-      - 30003:30003
-      - 30005:30005
-    restart: unless-stopped
-    env_file:
-      - .env
-      - piaware.env
-
   dump1090-json:
     networks:
       - skyscan
     image: iqtlabs/edgetech-dump1090-json:v1.1
     restart: unless-stopped
-    depends_on: 
+    depends_on:
       - mqtt
-      - piaware
     logging:
       driver: "json-file"
       options:
@@ -79,6 +62,19 @@ services:
     env_file:
       - .env
       - ./dump1090-json.env
+
+  cot-bridge:
+    networks:
+      - skyscan
+    build:
+      context: ./cot/bridge
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+    env_file:
+      - .env
+      - cot-bridge.env
 
   skyscan-c2:
     networks:

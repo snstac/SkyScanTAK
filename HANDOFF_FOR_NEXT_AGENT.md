@@ -43,8 +43,7 @@ FOV quad uses spherical-Earth geodesics, horizontal FOV vs zoom, `distance` from
 
 ## Git / save state
 
-After edits, maintainers should commit with a clear message, e.g.  
-`Add CoT bridge with TAK FOV polygon, aircraft SPI, compose and env updates`
+The work described here was committed on branch `main`. Inspect history with `git log --oneline -5`.
 
 **Do not commit `.env`** (gitignored); keep secrets only in local `.env`.
 

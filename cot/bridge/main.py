@@ -1,20 +1,23 @@
 #!/usr/bin/env python3
-"""MQTT (EdgeTech Logger) to Cursor-on-Target UDP bridge for SkyScan PTZ sensor."""
+"""MQTT (EdgeTech Logger) to Cursor-on-Target bridge for SkyScan PTZ sensor (PyTAK)."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 import os
-import socket
+import re
 import threading
 import time
 import xml.etree.ElementTree as ET
+from configparser import ConfigParser, SectionProxy
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping
 
 import paho.mqtt.client as mqtt
+import pytak
 
 LOGGER_TOPIC = os.environ.get("LOGGER_TOPIC", "")
 OBJECT_TOPIC = os.environ.get("OBJECT_TOPIC", "").strip()
@@ -88,7 +91,27 @@ COT_AIR_LINK_SENSOR = os.environ.get("COT_AIR_LINK_SENSOR", "true").strip().lowe
     "on",
 )
 
-# Ground FOV polygon for TAK/TAKX (separate CoT from <sensor>; default TAK u-d-f drawing)
+# Spot-map POI for skyscan-c2 selected track (same lat/lon as SPI; TAK-friendly map icon)
+_COT_TRACK_POI_RAW = os.environ.get("COT_TRACK_POI_ENABLE", "true").strip().lower()
+COT_TRACK_POI_ENABLE = _COT_TRACK_POI_RAW in ("1", "true", "yes", "on")
+COT_TRACK_POI_TYPE = os.environ.get("COT_TRACK_POI_TYPE", "b-m-p-s-m").strip()
+COT_TRACK_POI_HOW = os.environ.get("COT_TRACK_POI_HOW", "h-g-i-g-o").strip()
+COT_TRACK_POI_UID_SUFFIX = os.environ.get("COT_TRACK_POI_UID_SUFFIX", "-poi").strip() or "-poi"
+_COT_TRACK_POI_STALE = os.environ.get("COT_TRACK_POI_STALE_SECONDS", "").strip()
+COT_TRACK_POI_STALE_SECONDS = (
+    float(_COT_TRACK_POI_STALE) if _COT_TRACK_POI_STALE else COT_AIR_STALE_SECONDS
+)
+COT_TRACK_POI_COLOR_ARGB = os.environ.get("COT_TRACK_POI_COLOR_ARGB", "-65536").strip()
+COT_TRACK_POI_ICONSET = os.environ.get(
+    "COT_TRACK_POI_ICONSET",
+    "COT_MAPPING_SPOTMAP/b-m-p-s-m/-65536",
+).strip()
+
+# Mapping sensor CoT (b-m-p-s-p-e etc. with <sensor>); WinTAK-friendly. FOV polygon is separate (TAKX-friendly).
+_COT_SENSOR_EN = os.environ.get("COT_SENSOR_ENABLE", "true").strip().lower()
+COT_SENSOR_ENABLE = _COT_SENSOR_EN in ("1", "true", "yes", "on")
+
+# Ground FOV polygon (u-d-f / mitre polyline); TAK/TAKX often need this because they ignore <sensor> fov/vfov.
 _COT_FOV_EN = os.environ.get("COT_FOV_ENABLE", "true").strip().lower()
 COT_FOV_ENABLE = _COT_FOV_EN in ("1", "true", "yes", "on")
 COT_FOV_FORMAT = os.environ.get("COT_FOV_FORMAT", "tak").strip().lower()
@@ -124,6 +147,100 @@ _last_air_send_mon = 0.0
 _min_air_send_period = (
     1.0 / COT_AIR_MAX_SEND_RATE if COT_AIR_MAX_SEND_RATE > 0 else 0.0
 )
+
+_pytak_lock = threading.Lock()
+_pytak_loop: asyncio.AbstractEventLoop | None = None
+_pytak_tx_queue: asyncio.Queue | None = None
+
+
+def _pytak_section() -> SectionProxy:
+    cp = ConfigParser()
+    cot_url = os.environ.get("COT_URL", "").strip()
+    if not cot_url:
+        cot_url = f"udp+wo://{COT_UDP_HOST}:{COT_UDP_PORT}"
+    cp["skyscan"] = {
+        "COT_URL": cot_url,
+        "PYTAK_MULTICAST_TTL": str(COT_MULTICAST_TTL),
+        "PYTAK_NO_HELLO": "true",
+        "TAK_PROTO": "0",
+        "MAX_OUT_QUEUE": "500",
+    }
+    return cp["skyscan"]
+
+
+def _effective_cot_url() -> str:
+    return os.environ.get("COT_URL", "").strip() or (
+        f"udp+wo://{COT_UDP_HOST}:{COT_UDP_PORT}"
+    )
+
+
+_COT_LOG_TOKEN_RE = re.compile(r"([?&]token=)[^&]*", re.IGNORECASE)
+
+
+def _cot_url_for_logs(url: str) -> str:
+    """Mask enrollment token in tak:// URLs for log lines."""
+    if not url:
+        return url
+    return _COT_LOG_TOKEN_RE.sub(r"\1<redacted>", url)
+async def _pytak_async_main(
+    ready: threading.Event, err_holder: list[Exception]
+) -> None:
+    global _pytak_loop, _pytak_tx_queue
+    try:
+        clitool = pytak.CLITool(_pytak_section())
+        await clitool.setup()
+        loop = asyncio.get_running_loop()
+        with _pytak_lock:
+            _pytak_loop = loop
+            _pytak_tx_queue = clitool.tx_queue
+        ready.set()
+        await clitool.run()
+    except Exception as exc:
+        err_holder.append(exc)
+        if not ready.is_set():
+            ready.set()
+        raise
+
+
+def _pytak_thread_main(ready: threading.Event, err_holder: list[Exception]) -> None:
+    asyncio.run(_pytak_async_main(ready, err_holder))
+
+
+def _start_pytak_sender() -> None:
+    ready = threading.Event()
+    errors: list[Exception] = []
+    thread = threading.Thread(
+        target=_pytak_thread_main,
+        args=(ready, errors),
+        daemon=True,
+        name="pytak-sender",
+    )
+    thread.start()
+    if not ready.wait(timeout=60.0):
+        raise RuntimeError("PyTAK background thread did not become ready within 60s")
+    if errors:
+        raise RuntimeError(f"PyTAK failed during startup: {errors[0]}") from errors[0]
+    with _pytak_lock:
+        if _pytak_loop is None or _pytak_tx_queue is None:
+            raise RuntimeError("PyTAK loop/queue not initialized")
+
+
+def _send_cot(xml: str) -> None:
+    data = xml.encode("utf-8")
+    with _pytak_lock:
+        loop = _pytak_loop
+        txq = _pytak_tx_queue
+    if loop is None or txq is None:
+        logging.warning("PyTAK not ready; dropping CoT (%d bytes)", len(data))
+        return
+
+    def _put() -> None:
+        try:
+            txq.put_nowait(data)
+        except asyncio.QueueFull:
+            logging.warning("PyTAK TX queue full; dropping CoT event")
+
+    loop.call_soon_threadsafe(_put)
 
 
 def _utc_cot_time(dt: datetime) -> str:
@@ -403,6 +520,17 @@ def _build_air_remarks(obj: Mapping[str, Any]) -> str:
     return " ".join(parts)
 
 
+def _selected_track_uid_base(obj: Mapping[str, Any]) -> str | None:
+    """Stable uid stem for a selected object (same logic as aircraft SPI)."""
+    oid_raw = obj.get("object_id")
+    if oid_raw is None:
+        return None
+    oid = _sanitize_uid_part(str(oid_raw))
+    if COT_AIR_UID_PREFIX:
+        return f"{COT_AIR_UID_PREFIX}{oid}"
+    return f"{COT_UID}-adsb-{oid}"
+
+
 def build_air_spi_cot(obj: Mapping[str, Any]) -> str | None:
     """Mapping SPI/SPOI-style marker at aircraft position (default type b-m-p-s-p-i)."""
     lat = _coerce_float(obj.get("latitude"))
@@ -415,10 +543,9 @@ def build_air_spi_cot(obj: Mapping[str, Any]) -> str | None:
 
     oid_raw = obj.get("object_id")
     oid = _sanitize_uid_part(str(oid_raw)) if oid_raw is not None else "unknown"
-    if COT_AIR_UID_PREFIX:
-        uid = f"{COT_AIR_UID_PREFIX}{oid}"
-    else:
-        uid = f"{COT_UID}-adsb-{oid}"
+    uid = _selected_track_uid_base(obj) or (
+        f"{COT_AIR_UID_PREFIX}{oid}" if COT_AIR_UID_PREFIX else f"{COT_UID}-adsb-{oid}"
+    )
 
     flight_raw = obj.get("flight")
     callsign = _str_clean(flight_raw) or f"ADS-B-{oid}"
@@ -464,6 +591,81 @@ def build_air_spi_cot(obj: Mapping[str, Any]) -> str | None:
             },
         )
     ET.SubElement(detail, "remarks").text = _build_air_remarks(obj)[:2000]
+
+    body = ET.tostring(event, encoding="unicode")
+    return (
+        "<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n" + body
+    )
+
+
+def build_track_spot_poi_cot(obj: Mapping[str, Any]) -> str | None:
+    """Spot-map POI (default b-m-p-s-m) at selected aircraft; distinct uid from SPI."""
+    if not COT_TRACK_POI_ENABLE:
+        return None
+    base = _selected_track_uid_base(obj)
+    if base is None:
+        return None
+    lat = _coerce_float(obj.get("latitude"))
+    lon = _coerce_float(obj.get("longitude"))
+    alt = _coerce_float(obj.get("altitude"))
+    if lat is None or lon is None or alt is None:
+        return None
+    if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+        return None
+
+    uid = f"{base}{COT_TRACK_POI_UID_SUFFIX}"
+    flight_raw = obj.get("flight")
+    oid_raw = obj.get("object_id")
+    oid_disp = _sanitize_uid_part(str(oid_raw)) if oid_raw is not None else "unknown"
+    callsign_base = _str_clean(flight_raw) or f"ADS-B-{oid_disp}"
+    callsign = f"{callsign_base} (SkyScan POI)"[:200]
+
+    now = datetime.now(timezone.utc)
+    stale = now + timedelta(seconds=COT_TRACK_POI_STALE_SECONDS)
+
+    event = ET.Element(
+        "event",
+        {
+            "version": "2.0",
+            "uid": uid,
+            "type": COT_TRACK_POI_TYPE,
+            "time": _utc_cot_time(now),
+            "start": _utc_cot_time(now),
+            "stale": _utc_cot_time(stale),
+            "how": COT_TRACK_POI_HOW,
+        },
+    )
+
+    ET.SubElement(
+        event,
+        "point",
+        {
+            "lat": f"{lat:.8f}",
+            "lon": f"{lon:.8f}",
+            "hae": f"{alt:.3f}",
+            "ce": f"{COT_AIR_POINT_CE:.3f}",
+            "le": f"{COT_AIR_POINT_LE:.3f}",
+        },
+    )
+
+    detail = ET.SubElement(event, "detail")
+    ET.SubElement(detail, "contact", {"callsign": callsign})
+    if COT_AIR_LINK_SENSOR:
+        ET.SubElement(
+            detail,
+            "link",
+            {
+                "uid": COT_UID,
+                "type": SENSOR_TYPE,
+                "relation": "p-p",
+            },
+        )
+    rmk = f"SkyScan selected track (POI / {COT_TRACK_POI_TYPE}) " + _build_air_remarks(obj)
+    ET.SubElement(detail, "remarks").text = rmk[:2000]
+    ET.SubElement(detail, "color", {"argb": COT_TRACK_POI_COLOR_ARGB})
+    if COT_TRACK_POI_ICONSET:
+        ET.SubElement(detail, "usericon", {"iconsetpath": COT_TRACK_POI_ICONSET})
+    ET.SubElement(detail, "archive")
 
     body = ET.tostring(event, encoding="unicode")
     return (
@@ -715,26 +917,6 @@ def build_fov_polygon_cot(
     )
 
 
-def _is_multicast_ipv4(host: str) -> bool:
-    try:
-        octets = [int(x) for x in host.split(".")]
-        if len(octets) != 4:
-            return False
-        first = octets[0]
-        return 224 <= first <= 239
-    except ValueError:
-        return False
-
-
-def _send_udp(xml: str) -> None:
-    data = xml.encode("utf-8")
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        if _is_multicast_ipv4(COT_UDP_HOST):
-            s.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, COT_MULTICAST_TTL)
-        s.sendto(data, (COT_UDP_HOST, COT_UDP_PORT))
-    logging.debug("Sent CoT (%d bytes) to %s:%s", len(data), COT_UDP_HOST, COT_UDP_PORT)
-
-
 def _emit_pose(
     azimuth: float,
     elevation: float,
@@ -753,14 +935,15 @@ def _emit_pose(
         if (now_m - _last_send_mon) < _min_send_period:
             return
     _last_send_mon = now_m
-    xml = build_sensor_cot(
-        azimuth,
-        elevation,
-        remarks_extra=remarks,
-        zoom=zm,
-        distance_m=dm,
-    )
-    _send_udp(xml)
+    if COT_SENSOR_ENABLE:
+        xml = build_sensor_cot(
+            azimuth,
+            elevation,
+            remarks_extra=remarks,
+            zoom=zm,
+            distance_m=dm,
+        )
+        _send_cot(xml)
     if COT_FOV_ENABLE:
         try:
             fov_xml = build_fov_polygon_cot(
@@ -770,9 +953,9 @@ def _emit_pose(
                 distance_m=dm,
             )
             if fov_xml:
-                _send_udp(fov_xml)
-        except OSError as e:
-            logging.error("UDP FOV polygon CoT send failed: %s", e)
+                _send_cot(fov_xml)
+        except Exception as e:
+            logging.error("FOV polygon CoT build/send failed: %s", e)
 
 
 def _emit_air_spi(obj: Mapping[str, Any]) -> None:
@@ -781,14 +964,15 @@ def _emit_air_spi(obj: Mapping[str, Any]) -> None:
     if _min_air_send_period > 0:
         if (now_m - _last_air_send_mon) < _min_air_send_period:
             return
-    xml = build_air_spi_cot(obj)
-    if not xml:
-        return
     _last_air_send_mon = now_m
-    try:
-        _send_udp(xml)
-    except OSError as e:
-        logging.error("UDP air SPI send failed: %s", e)
+    if COT_AIR_ENABLE:
+        xml = build_air_spi_cot(obj)
+        if xml:
+            _send_cot(xml)
+    if COT_TRACK_POI_ENABLE:
+        xml_poi = build_track_spot_poi_cot(obj)
+        if xml_poi:
+            _send_cot(xml_poi)
 
 
 def _on_logger_message(
@@ -852,7 +1036,7 @@ def _on_logger_message(
 
 
 def _on_selected_object_message(msg: mqtt.MQTTMessage) -> None:
-    if not COT_AIR_ENABLE:
+    if not COT_AIR_ENABLE and not COT_TRACK_POI_ENABLE:
         return
     if not msg.payload:
         return
@@ -885,31 +1069,24 @@ def _heartbeat_loop(stop: threading.Event) -> None:
             rmk = f"last object {oid}"
         if zm is not None:
             rmk = f"{rmk} zoom={zm}".strip()
-        try:
-            _emit_pose(
-                rho,
-                tau,
-                remarks=rmk,
-                force=True,
-                zoom=zm,
-                distance_m=dist,
-            )
-        except OSError as e:
-            logging.error("UDP send failed: %s", e)
+        _emit_pose(
+            rho,
+            tau,
+            remarks=rmk,
+            force=True,
+            zoom=zm,
+            distance_m=dist,
+        )
 
 
 def _ping_loop(stop: threading.Event) -> None:
     while not stop.wait(timeout=COT_PING_INTERVAL):
-        try:
-            _send_udp(build_ping_cot())
-            logging.debug(
-                "CoT ping uid=%s -> %s:%s",
-                COT_PING_UID,
-                COT_UDP_HOST,
-                COT_UDP_PORT,
-            )
-        except OSError as e:
-            logging.error("UDP ping send failed: %s", e)
+        _send_cot(build_ping_cot())
+        logging.debug(
+            "CoT ping uid=%s (PyTAK %s)",
+            COT_PING_UID,
+            _cot_url_for_logs(_effective_cot_url()),
+        )
 
 
 def _equip_sensor_loop(stop: threading.Event) -> None:
@@ -925,25 +1102,21 @@ def _equip_sensor_loop(stop: threading.Event) -> None:
             rmk = f"last object {oid}"
         if zm is not None:
             rmk = f"{rmk} zoom={zm}".strip()
-        try:
-            _send_udp(
-                build_equipment_sensor_cot(
-                    rho,
-                    tau,
-                    remarks_extra=rmk,
-                    zoom=zm,
-                    distance_m=dist,
-                )
+        _send_cot(
+            build_equipment_sensor_cot(
+                rho,
+                tau,
+                remarks_extra=rmk,
+                zoom=zm,
+                distance_m=dist,
             )
-            logging.debug(
-                "Equipment sensor CoT type=%s uid=%s -> %s:%s",
-                COT_EQUIP_TYPE,
-                COT_UID,
-                COT_UDP_HOST,
-                COT_UDP_PORT,
-            )
-        except OSError as e:
-            logging.error("UDP equipment sensor CoT send failed: %s", e)
+        )
+        logging.debug(
+            "Equipment sensor CoT type=%s uid=%s (PyTAK %s)",
+            COT_EQUIP_TYPE,
+            COT_UID,
+            _cot_url_for_logs(_effective_cot_url()),
+        )
 
 
 def main() -> None:
@@ -954,16 +1127,33 @@ def main() -> None:
     if not LOGGER_TOPIC:
         raise SystemExit("LOGGER_TOPIC is not set")
 
-    if OBJECT_TOPIC and COT_AIR_ENABLE:
+    cot_disp = _cot_url_for_logs(_effective_cot_url())
+    logging.info("Starting PyTAK sender (COT_URL=%s)", cot_disp)
+    _start_pytak_sender()
+
+    if OBJECT_TOPIC and (COT_AIR_ENABLE or COT_TRACK_POI_ENABLE):
         logging.info(
-            "Aircraft position -> CoT %s (SPI/SPOI-style) on same UDP as PTZ sensor",
+            "Selected aircraft CoT: SPI type=%s (enable=%s), spot POI type=%s (enable=%s)",
             COT_AIR_TYPE,
+            COT_AIR_ENABLE,
+            COT_TRACK_POI_TYPE,
+            COT_TRACK_POI_ENABLE,
+        )
+    if COT_SENSOR_ENABLE:
+        logging.info(
+            "PTZ mapping sensor CoT enabled type=%s uid=%s (WinTAK-friendly <sensor>)",
+            SENSOR_TYPE,
+            COT_UID,
         )
     if COT_FOV_ENABLE:
         logging.info(
-            "FOV ground polygon -> CoT type u-d-f format=%s uid=%s (same UDP as sensor)",
+            "FOV ground polygon -> CoT type u-d-f format=%s uid=%s (TAKX-friendly; same PyTAK destination)",
             COT_FOV_FORMAT,
             COT_FOV_UID,
+        )
+    if not COT_SENSOR_ENABLE and not COT_FOV_ENABLE:
+        logging.warning(
+            "COT_SENSOR_ENABLE and COT_FOV_ENABLE are both false; PTZ pose emits no CoT"
         )
 
     # Home pose until first Logger message
@@ -977,16 +1167,12 @@ def main() -> None:
 
     stop_ping = threading.Event()
     if COT_PING_INTERVAL > 0:
-        try:
-            _send_udp(build_ping_cot())
-            logging.info(
-                "Initial CoT ping uid=%s -> %s:%s",
-                COT_PING_UID,
-                COT_UDP_HOST,
-                COT_UDP_PORT,
-            )
-        except OSError as e:
-            logging.error("UDP ping send failed: %s", e)
+        _send_cot(build_ping_cot())
+        logging.info(
+            "Initial CoT ping uid=%s (PyTAK %s)",
+            COT_PING_UID,
+            cot_disp,
+        )
         ping_thread = threading.Thread(
             target=_ping_loop, args=(stop_ping,), daemon=True
         )
@@ -994,17 +1180,15 @@ def main() -> None:
 
     stop_equip = threading.Event()
     if COT_EQUIP_INTERVAL > 0:
-        try:
-            _send_udp(build_equipment_sensor_cot(0.0, 0.0, remarks_extra="SkyScan home"))
-            logging.info(
-                "Initial equipment sensor CoT type=%s uid=%s -> %s:%s",
-                COT_EQUIP_TYPE,
-                COT_UID,
-                COT_UDP_HOST,
-                COT_UDP_PORT,
-            )
-        except OSError as e:
-            logging.error("UDP equipment sensor CoT send failed: %s", e)
+        _send_cot(
+            build_equipment_sensor_cot(0.0, 0.0, remarks_extra="SkyScan home")
+        )
+        logging.info(
+            "Initial equipment sensor CoT type=%s uid=%s (PyTAK %s)",
+            COT_EQUIP_TYPE,
+            COT_UID,
+            cot_disp,
+        )
         equip_thread = threading.Thread(
             target=_equip_sensor_loop, args=(stop_equip,), daemon=True
         )
@@ -1027,18 +1211,23 @@ def main() -> None:
             return
         client_.subscribe(LOGGER_TOPIC)
         logging.info("Subscribed to %s", LOGGER_TOPIC)
-        if OBJECT_TOPIC and COT_AIR_ENABLE:
+        if OBJECT_TOPIC and (COT_AIR_ENABLE or COT_TRACK_POI_ENABLE):
             client_.subscribe(OBJECT_TOPIC)
             logging.info(
-                "Subscribed to %s (aircraft marker CoT type=%s)",
+                "Subscribed to %s (SPI type=%s POI type=%s)",
                 OBJECT_TOPIC,
                 COT_AIR_TYPE,
+                COT_TRACK_POI_TYPE,
             )
 
     client.on_connect = on_connect
     client.on_message = _on_message
 
-    logging.info("Connecting to MQTT %s for CoT -> UDP %s:%s", MQTT_IP, COT_UDP_HOST, COT_UDP_PORT)
+    logging.info(
+        "Connecting to MQTT %s (publishing CoT via PyTAK %s)",
+        MQTT_IP,
+        cot_disp,
+    )
     client.connect(MQTT_IP, 1883, keepalive=60)
     client.loop_forever()
 

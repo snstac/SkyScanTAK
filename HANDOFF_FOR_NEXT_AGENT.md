@@ -24,7 +24,7 @@ This note is for the **next agent or maintainer** working in this repository. It
 | PTZ sensor | `COT_UID` | Mapping sensor event; `<sensor>` with az/el/fov/range |
 | Equipment | same as `COT_UID` | `COT_EQUIP_TYPE` (e.g. `a-f-G-E-S-E`), periodic |
 | Aircraft | `{COT_UID}-adsb-{icao}` | From `OBJECT_TOPIC` / Selected Object; `COT_AIR_TYPE` default `b-m-p-s-p-i` |
-| FOV polygon | `COT_FOV_UID` default `{COT_UID}-fov` | TAK **`u-d-f`** + `<link point="lat,lon">` by default; **`COT_FOV_FORMAT=mitre`** → `<shape><polyline closed="true">` |
+| FOV polygon | `COT_FOV_UID` default `{COT_UID}-fov` | TAK **`u-d-f`** + `<link point="lat,lon">` by default; **`COT_FOV_FORMAT=mitre`** → `<shape><polyline closed="true">`. **`COT_FOV_ENABLE`** (default on). Send **together with** **`COT_SENSOR_ENABLE`** (default on) so WinTAK and TAKX can each use one stream. |
 
 TAKX may ignore `<sensor>` FOV attributes; the **FOV polygon** is the TAK-friendly footprint.
 

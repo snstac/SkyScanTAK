@@ -1,6 +1,10 @@
 # SkyScan CoT sensor bridge
 
-Subscribes to the Axis PTZ controller **Logger** MQTT topic (`LOGGER_TOPIC` from `.env`), reads **camera-pointing** `rho_c` / `tau_c` (degrees), and emits **Cursor on Target** XML over **UDP** for TAK/ATAK-style clients.
+Subscribes to the Axis PTZ controller **Logger** MQTT topic (`LOGGER_TOPIC` from `.env`), reads **camera-pointing** `rho_c` / `tau_c` (degrees), and emits **Cursor on Target** XML via **[PyTAK](https://github.com/snstac/pytak)** ([docs](https://pytak.readthedocs.io/)) for TAK/ATAK-style clients.
+
+**Transport:** By default the bridge uses **`udp+wo://COT_UDP_HOST:COT_UDP_PORT`** (write-only UDP to your existing unicast or multicast address). Set **`COT_URL`** in [`cot-bridge.env`](../../cot-bridge.env) to use any PyTAK-supported scheme instead (for example **`tcp://tak.example.com:8087`**, **`tls://…`**, **`marti://…`**). Multicast TTL is taken from **`COT_MULTICAST_TTL`** and passed to PyTAK as **`PYTAK_MULTICAST_TTL`**. The bridge sets **`PYTAK_NO_HELLO=true`** so PyTAK does not inject its default hello marker (behavior matches the pre-PyTAK bridge). CoT remains **XML** (`TAK_PROTO=0`); use protobuf only if you add `takproto` and change that deliberately.
+
+**PTZ updates:** By default the bridge sends **two** CoT events per pose (same PyTAK destination): a **mapping-sensor** event (`SENSOR_TYPE`, `<sensor>` attributes) and a **ground FOV polygon** (`u-d-f` or mitre polyline). That supports clients that only understand one representation (e.g. WinTAK vs TAKX). Toggle with **`COT_SENSOR_ENABLE`** / **`COT_FOV_ENABLE`** in [`cot-bridge.env`](../../cot-bridge.env).
 
 ## Aircraft SPI / SPOI CoT
 
@@ -11,7 +15,7 @@ When **`OBJECT_TOPIC`** is set (skyscan-c2 **Selected Object** topic from `.env`
 | **`COT_AIR_TYPE`** | Default **`b-m-p-s-p-i`** (MITRE mapping / sensor / point / *interest*, i.e. SPI-style). Use **`b-m-p-s-m`** for spot-map style. |
 | **`COT_AIR_ENABLE`** | `false` disables aircraft CoT (default on when `OBJECT_TOPIC` is non-empty). |
 | **`COT_AIR_STALE_SECONDS`** | `stale` offset for the air marker (default 45). |
-| **`COT_AIR_MAX_SEND_RATE`** | Max air CoT UDP datagrams per second (default 3). |
+| **`COT_AIR_MAX_SEND_RATE`** | Max air CoT sends per second (default 3). |
 | **`COT_AIR_UID_PREFIX`** | If set, air CoT **`uid`** is `{prefix}{icao}`; else `{COT_UID}-adsb-{icao}`. |
 | **`COT_AIR_LINK_SENSOR`** | If true (default), adds **`<link uid="COT_UID" type="SENSOR_TYPE" relation="p-p"/>`** to the PTZ sensor. |
 
@@ -19,11 +23,12 @@ Payload: EdgeTech wrapper with **`data_payload_type`: `"Selected Object"`** and 
 
 ## FOV polygon (TAK / TAKX)
 
-Clients such as **TAKX** may not render **`<sensor fov="..." vfov="...">`**. The bridge therefore sends a **second** CoT (stable **`COT_FOV_UID`**, default `<COT_UID>-fov`) for the **horizontal** FOV footprint on the ground: a closed quadrilateral (near arc + far arc from the tripod) in the same UDP stream as the PTZ mapping event.
+Clients such as **TAKX** may not render **`<sensor fov="..." vfov="...">`**. The bridge can send a **second** CoT (stable **`COT_FOV_UID`**, default `<COT_UID>-fov`) for the **horizontal** FOV footprint on the ground: a closed quadrilateral (near arc + far arc from the tripod), on the **same** PyTAK destination as the mapping-sensor event.
 
 | Env | Meaning |
 |-----|---------|
-| **`COT_FOV_ENABLE`** | `false` disables the extra polygon (default on). |
+| **`COT_SENSOR_ENABLE`** | `false` disables the mapping-sensor CoT (`SENSOR_TYPE` with `<sensor>`). Default **`true`** (WinTAK-friendly). |
+| **`COT_FOV_ENABLE`** | `false` disables the extra polygon. Default **`true`** (TAK/TAKX drawing-friendly). |
 | **`COT_FOV_FORMAT`** | **`tak`** (default): TAK-style **`u-d-f`** with **`<link point="lat,lon"/>`** vertices (first point repeated to close). **`mitre`**: **`<shape><polyline closed="true"><vertex lat lon hae/>`** per MITRE shape schema. |
 | **`COT_FOV_DEFAULT_RANGE_M`** | Slant range (m) when Logger **`distance`** is absent (default 10000). |
 | **`COT_FOV_STALE_SECONDS`** | If unset, uses **`COT_STALE_SECONDS`**. |
@@ -33,11 +38,11 @@ Geometry uses spherical-Earth geodesics from **`TRIPOD_LATITUDE` / `TRIPOD_LONGI
 
 ## Periodic ping
 
-A lightweight marker CoT (default type `b-m-p-s-m`, `how=h-g-i-g-o`) is sent every **`COT_PING_INTERVAL`** seconds to the same UDP host/port, using a **separate uid** (`COT_PING_UID`, default `<COT_UID>-ping`). Set **`COT_PING_INTERVAL=0`** to disable.
+A lightweight marker CoT (default type `b-m-p-s-m`, `how=h-g-i-g-o`) is sent every **`COT_PING_INTERVAL`** seconds to the same PyTAK destination, using a **separate uid** (`COT_PING_UID`, default `<COT_UID>-ping`). Set **`COT_PING_INTERVAL=0`** to disable.
 
 ## Periodic equipment sensor (`a-f-G-E-S-E`)
 
-Every **`COT_EQUIP_INTERVAL`** seconds (default 60), the bridge sends a second CoT using **`COT_EQUIP_TYPE`** (default **`a-f-G-E-S-E`**, friendly ground equipment / sensor / electro-optical) with the **same `COT_UID`** as the mapping-sensor stream, Tripod **`point`**, and a **`<sensor>`** block with current `rho_c`/`tau_c`-equivalent azimuth/elevation, the same FOV/range/modality rules as the mapping feed. One initial datagram is sent at startup. Set **`COT_EQUIP_INTERVAL=0`** to disable.
+Every **`COT_EQUIP_INTERVAL`** seconds (default 60), the bridge sends a second CoT using **`COT_EQUIP_TYPE`** (default **`a-f-G-E-S-E`**, friendly ground equipment / sensor / electro-optical) with the **same `COT_UID`** as the mapping-sensor stream, Tripod **`point`**, and a **`<sensor>`** block with current `rho_c`/`tau_c`-equivalent azimuth/elevation, the same FOV/range/modality rules as the mapping feed. One initial event is sent at startup. Set **`COT_EQUIP_INTERVAL=0`** to disable.
 
 ## EdgeTech Logger payload
 
@@ -89,15 +94,17 @@ mosquitto_sub -h 127.0.0.1 -p 1884 -t '/skyscan/roof_sf/Logger/edgetech-axis-ptz
 
 Confirm the payload contains `camera-pointing` with `rho_c` / `tau_c`.
 
-## Validate UDP
+## Validate CoT (default UDP)
 
-Listen for a datagram (example):
+With the default **`udp+wo://…`** URL, CoT is still one XML event per **UDP datagram**. Listen (example):
 
 ```bash
 nc -u -l 4242
 ```
 
-Point `COT_UDP_HOST` / `COT_UDP_PORT` in [`cot-bridge.env`](../../cot-bridge.env) at the machine running that listener. From **inside Docker**, `127.0.0.1` is the bridge container itself—use the **host LAN IP**, `host.docker.internal` (where supported), or attach the bridge to `network_mode: host` if you must send to localhost on the host.
+Point `COT_UDP_HOST` / `COT_UDP_PORT` in [`cot-bridge.env`](../../cot-bridge.env) at the machine running that listener (or set **`COT_URL`** to match your test setup). From **inside Docker**, `127.0.0.1` is the bridge container itself—use the **host LAN IP**, `host.docker.internal` (where supported), or attach the bridge to `network_mode: host` if you must send to localhost on the host.
+
+For **`tcp://`**, **`tls://`**, or **`marti://`**, use a TAK client or PyTAK-compatible listener instead of raw UDP `nc`.
 
 ## CoT schema reference
 

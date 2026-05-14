@@ -1,0 +1,3 @@
+paho-mqtt==2.1.0
+pandas==2.2.3
+pytak[with-crypto,with-aiohttp]==7.3.7

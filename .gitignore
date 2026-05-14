@@ -1,5 +1,7 @@
 # Skyscan gitignore
 .DS_Store
+# PyTAK TAK enrollment cache (client cert + passphrase); do not commit
+data/cot-bridge-pytak/
 data/weights/localizer.pt
 data/to_sort/*
 data/processed/log/*.json

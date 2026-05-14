@@ -30,14 +30,37 @@ services:
     restart: unless-stopped
     depends_on: 
       - mqtt
+    environment:
+      # Publish only to raw ADS-B ledger; skyscan-c2 consumes merged topic (see cot-track-fusion)
+      LEDGER_TOPIC: ${OBJECT_LEDGER_TOPIC}
     env_file:
       - .env
       - object-ledger.env
 
+  cot-track-fusion:
+    networks:
+      - skyscan
+    build:
+      context: ./cot/track_fusion
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+      - object-ledger
+    env_file:
+      - .env
+      - cot-bridge.env
+      - cot-track-fusion.env
+    volumes:
+      # Same enrollment + client certs as cot-bridge (shared COT_URL)
+      - ./data/cot-bridge-pytak:/root/.pytak
+
   controller:
     networks:
       - skyscan
-    image: iqtlabs/edgetech-axis-ptz-controller:v2.0
+    build:
+      context: ./axis-ptz-controller
+      dockerfile: Dockerfile
     volumes:
       - ./data/to_sort:/data/to_sort
     restart: unless-stopped
@@ -69,6 +92,9 @@ services:
     build:
       context: ./cot/bridge
       dockerfile: Dockerfile
+    volumes:
+      # PyTAK TAK enrollment client cert + passphrase cache (~/.pytak)
+      - ./data/cot-bridge-pytak:/root/.pytak
     restart: unless-stopped
     depends_on:
       - mqtt
@@ -79,13 +105,16 @@ services:
   skyscan-c2:
     networks:
       - skyscan
-    image: iqtlabs/edgetech-skyscan-c2:v1.0
+    build:
+      context: ./skyscan-c2
+      dockerfile: Dockerfile
     volumes:
       - ./data/mapping:/data/mapping
     restart: unless-stopped
     depends_on:
       - mqtt
       - object-ledger
+      - cot-track-fusion
     logging:
       driver: "json-file"
       options:
@@ -94,6 +123,22 @@ services:
     env_file:
       - .env
       - skyscan-c2.env
+
+  video-gateway:
+    networks:
+      - skyscan
+    build:
+      context: ./video
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - mqtt
+    env_file:
+      - .env
+      - video-gateway.env
+    # ATAK / UAS: MPEG-TS (H.264 + KLV) over TCP — see video/README.md § ATAK
+    ports:
+      - "8556:8556"
 
   # occlusion-mapper:
   #   networks:

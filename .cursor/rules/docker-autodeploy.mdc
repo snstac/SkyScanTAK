@@ -1,0 +1,15 @@
+---
+description: Auto rebuild and restart Docker Compose services after relevant edits; never ask permission to deploy.
+globs: docker-compose.yaml,video/**/*,cot/**/*,skyscan-c2/**/*,axis-ptz-controller/**/*
+alwaysApply: false
+---
+
+# Docker auto-deploy (SkyScan)
+
+When changes affect Docker images, entrypoints, Dockerfiles, `docker-compose.yaml`, or service configs used by compose (`video-gateway.env`, `cot-bridge.env`, `.env` keys consumed by services), run from the repo root **before finishing the turn**:
+
+```bash
+docker compose build && docker compose up -d
+```
+
+Recreate services so new images and env files are picked up. **Do not prompt** the user for permission to run deploy commands for this project.

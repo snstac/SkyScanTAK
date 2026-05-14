@@ -1,1 +1,3 @@
 paho-mqtt==2.1.0
+# tak:// enrollment + tls:// CoT stream need cryptography and aiohttp
+pytak[with-crypto,with-aiohttp]==7.3.7

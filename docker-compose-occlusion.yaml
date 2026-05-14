@@ -25,7 +25,9 @@ services:
   controller:
     networks:
       - skyscan
-    image: iqtlabs/edgetech-axis-ptz-controller:v2.0
+    build:
+      context: ./axis-ptz-controller
+      dockerfile: Dockerfile
     volumes:
       - ./data/to_sort:/data/to_sort
     restart: unless-stopped

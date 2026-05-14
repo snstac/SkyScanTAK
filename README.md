@@ -97,7 +97,7 @@ The compose file includes a **`cot-bridge`** service (built from [`cot/bridge`](
 ## CoT bridge (TAK / TAKX)
 
 - **Env files:** `.env` (copy from [`skyscan.env`](skyscan.env)) supplies shared topics and tripod position; **[`cot-bridge.env`](cot-bridge.env)** supplies UDP destination, CoT identities, sensor/FOV/aircraft options.
-- **Outputs (same UDP socket):** PTZ mapping sensor (`SENSOR_TYPE`, default `b-m-p-s-p-e`); periodic equipment/sensor event (`COT_EQUIP_TYPE`); selected aircraft marker (`COT_AIR_TYPE`, e.g. `b-m-p-s-p-i`); **FOV ground polygon** (`u-d-f` by default) for clients that ignore `<sensor fov>` / `<sensor vfov>`.
+- **PTZ pose (defaults):** **`COT_SENSOR_ENABLE=true`** emits the mapping-sensor CoT with **`<sensor>`** (WinTAK-friendly). **`COT_FOV_ENABLE=true`** emits a **second** **`u-d-f`** FOV polygon (TAK/TAKX-friendly). Both are sent on the **same UDP port** for every throttled pose update unless toggled off.
 - **MQTT:** subscribes to **`LOGGER_TOPIC`** (camera pointing) and **`OBJECT_TOPIC`** (skyscan-c2 selected object) when aircraft CoT is enabled.
 
 After everything is up and running, goto the web interface for the camera to view what is being tracked.
@@ -257,9 +257,23 @@ The different EdgeTech modules used for SkyScan communicate with each other via 
             <td>ADS-B</td>
         </tr>
         <tr>
-            <td >LEDGER_TOPIC</td>
-            <td >/skyscan/<i>DEPLOYMENT</i>/Ledger/edgetech-object-ledger/JSON</td>
+            <td>OBJECT_LEDGER_TOPIC</td>
+            <td>/skyscan/<i>DEPLOYMENT</i>/Ledger/edgetech-object-ledger/JSON</td>
             <td>object-ledger</td>
+            <td>cot-track-fusion</td>
+            <td>ObjectLedger</td>
+        </tr>
+        <tr>
+            <td>MERGED_LEDGER_TOPIC</td>
+            <td>/skyscan/<i>DEPLOYMENT</i>/Ledger/skyscan-cot-merged/JSON</td>
+            <td>cot-track-fusion</td>
+            <td>skyscan-c2</td>
+            <td>ObjectLedger</td>
+        </tr>
+        <tr>
+            <td >LEDGER_TOPIC</td>
+            <td >/skyscan/<i>DEPLOYMENT</i>/Ledger/skyscan-cot-merged/JSON</td>
+            <td></td>
             <td>skyscan-c2</td>
             <td >ObjectLedger</td>
         </tr>
@@ -286,6 +300,12 @@ The different EdgeTech modules used for SkyScan communicate with each other via 
         </tr>
     </tbody>
 </table>
+
+## CoT track fusion and UAS priority
+
+When **`cot-track-fusion`** is enabled in [`docker-compose.yaml`](docker-compose.yaml), **object-ledger** still publishes only ADS-B on **`OBJECT_LEDGER_TOPIC`**. The fusion service merges those rows with CoT contacts received over PyTAK using the same **`COT_URL`** as **`cot-bridge`** (optional **`COT_RX_URL`** overrides RX only) and publishes **`MERGED_LEDGER_TOPIC`**. **skyscan-c2** is built from [`skyscan-c2/`](skyscan-c2) (vendored `c2_pub_sub.py`) so target selection prefers higher **`skyscan_priority`** (e.g. UAS type patterns) over closer ADS-B when both are selectable.
+
+Configure **[`cot-track-fusion.env`](cot-track-fusion.env)** (fusion-only options); **`COT_URL`** comes from **[`cot-bridge.env`](cot-bridge.env)** so send and receive share the same TAK endpoint and **`./data/cot-bridge-pytak`** certs. See [`cot/track_fusion/README.md`](cot/track_fusion/README.md).
 
 ## License
 

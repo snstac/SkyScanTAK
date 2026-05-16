@@ -134,8 +134,8 @@ services:
     depends_on:
       - mqtt
     env_file:
-      - .env
       - video-gateway.env
+      - .env
     # ATAK / UAS: MPEG-TS (H.264 + KLV) over TCP — see video/README.md § ATAK
     ports:
       - "8556:8556"

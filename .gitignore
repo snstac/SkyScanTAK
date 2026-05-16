@@ -1,5 +1,7 @@
 # Skyscan gitignore
 .DS_Store
+# Local MediaMTX / video secrets overlay (optional third env_file — see video/MEDIAMTX_SNSTAK.md)
+video-gateway.local.env
 # PyTAK TAK enrollment cache (client cert + passphrase); do not commit
 data/cot-bridge-pytak/
 data/weights/localizer.pt

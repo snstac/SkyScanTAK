@@ -3,9 +3,9 @@
 Sidecar container that:
 
 1. Pulls **live H.264** from the Axis camera (**RTSP**).
-2. Publishes **MPEG-TS over SRT** to [MediaMTX](https://github.com/bluenviron/mediamtx) (or any SRT listener). The **primary** path is the **HUD** leg (`VIDEO_HUD_ENABLE`): decode → **overlay** (`drawtext` + `textfile`) → transcode **libx264**. Optional **MISB ST 0601** KLV is multiplexed as a **binary data** stream (`-c:d copy`) when `VIDEO_KLV_ENABLE` is on (Python writes UAS Local Set packets to a FIFO at `VIDEO_KLV_RATE` Hz).
+2. Publishes to [MediaMTX](https://github.com/bluenviron/mediamtx) using **`MEDIAMTX_PUBLISH_PROTOCOL`**: **`rtsp`** (FFmpeg **`-f rtsp -rtsp_transport tcp`** to **`stream.snstak.com:8554`**, same contract as simple camera relays) or **`srt`** (MPEG-TS over **SRT** on port **8890**). The **primary** path is the **HUD** leg (`VIDEO_HUD_ENABLE`): decode → **overlay** (`drawtext` + `textfile`) → transcode **libx264**. Optional **MISB ST 0601** KLV is multiplexed as a **binary data** stream (`-c:d copy`) when `VIDEO_KLV_ENABLE` is on (Python writes UAS Local Set packets to a FIFO at `VIDEO_KLV_RATE` Hz).
 
-**Optional raw passthrough** — set `VIDEO_RAW_ENABLE=true` and populate `MEDIAMTX_SRT_URL_RAW` for a second `-c:v copy` SRT output. When **both** raw and HUD are on, **one `ffmpeg`** pulls **one** RTSP session and writes **two** SRT outputs (avoids Axis firmware that allows only one RTSP client, which would hide the second MediaMTX path).
+**Optional raw passthrough** — set `VIDEO_RAW_ENABLE=true` and set **`MEDIAMTX_RTSP_URL_RAW`** / **`MEDIAMTX_SRT_URL_RAW`** or **`MEDIAMTX_PUBLISH_PATH_RAW`** for a **`-c:v copy`** second publish. With **KLV** enabled, **`entrypoint.sh`** also publishes a **separate** HUD+KLV URL while the primary HUD leg remains **video-only**. When **raw**, **HUD**, and **HUD+KLV** are all on, **one `ffmpeg`** pulls **one** camera RTSP session and writes **three** MediaMTX outputs (plus optional ATAK TCP), avoiding Axis firmware that allows only one RTSP client.
 
 Telemetry for HUD + KLV comes from the same MQTT topics as the rest of SkyScan: `LOGGER_TOPIC` (camera-pointing / `rho_c`, `tau_c`, `zoom`, `distance`) and `OBJECT_TOPIC` (skyscan-c2 selected object: `flight`, `object_id`, lat/lon/alt). Tripod position for slant range and KLV “sensor” fields is taken from `TRIPOD_LATITUDE`, `TRIPOD_LONGITUDE`, `TRIPOD_ALTITUDE`.
 
@@ -13,7 +13,7 @@ Telemetry for HUD + KLV comes from the same MQTT topics as the rest of SkyScan: 
 
 ## ATAK-CIV / UAS Tool (video + MISB ST 0601 KLV)
 
-MediaMTX commonly **drops the KLV / data PID** when ingesting your SRT publish (`skipping track 2`), so **WinTAK/ATAK** may see **video only** on `rtsp://…/live/…` paths.
+MediaMTX commonly **drops the KLV / data PID** when ingesting your **video-only** HUD publish (`skipping track 2`), so **WinTAK/ATAK** may see **video only** on `rtsp://…/skyscan_…_cam_hud`. Use the **`…_cam_hud_klv`** path (or **`MEDIAMTX_RTSP_URL_HUD_KLV`** / **`MEDIAMTX_SRT_URL_HUD_KLV`**) for MPEG-TS that includes ST0601 through MediaMTX, or use ATAK TCP below.
 
 This gateway also exposes **MPEG-TS over TCP** on the host (H.264 + HUD + KLV) without relying on MediaMTX to preserve the metadata PID:
 
@@ -22,7 +22,7 @@ This gateway also exposes **MPEG-TS over TCP** on the host (H.264 + HUD + KLV) w
 | `VIDEO_ATAK_TS_TCP_ENABLE` | `true` |
 | `VIDEO_ATAK_TS_TCP_PORT` | `8556` |
 
-With ATAK enabled, FFmpeg runs **a second x264 encode** of the HUD (via `split=2`) so one mux goes to **`tcp://0.0.0.0:VIDEO_ATAK_TS_TCP_PORT?listen=1`** (listed **first** in the command line) and one to MediaMTX (SRT). Connect your viewer after both encoders have started; FFmpeg may log transient TCP mux errors until a client attaches.
+With ATAK enabled and **KLV** on, FFmpeg may run **two or three `libx264` encodes** of the HUD (via `split=2` or `split=3`): one mux goes to **`tcp://0.0.0.0:VIDEO_ATAK_TS_TCP_PORT?listen=1`**, one to MediaMTX **video-only** (RTSP or SRT per **`MEDIAMTX_PUBLISH_PROTOCOL`**), and when KLV is on, one more to MediaMTX **HUD+KLV**. Connect your viewer after encoders have started; FFmpeg may log transient TCP mux errors until a client attaches.
 
 `docker compose` publishes **`8556:8556`** on **video-gateway** by default.
 
@@ -38,23 +38,41 @@ See [ATAK-CIV](https://github.com/TAK-Product-Center/atak-civ) and CivTAK UAS do
 
 ## Configure
 
+snstac / **stream.snstak.com** MediaMTX (TAKWERX-generated config, path naming, auth): see **[`MEDIAMTX_SNSTAK.md`](./MEDIAMTX_SNSTAK.md)**.
+
 | Variable | Purpose |
 |----------|---------|
-| `MEDIAMTX_SRT_URL_HUD` | SRT output for HUD / overlay TS (quoted if `&` in URL). Legacy: `MEDIAMTX_SRT_URL_FIRIS` |
-| `MEDIAMTX_SRT_URL_RAW` | Optional; only used when `VIDEO_RAW_ENABLE=true` (unquoted empty = raw off) |
+| `MEDIAMTX_PUBLISH_PROTOCOL` | `rtsp` (default in `video-gateway.env`) or `srt` — how FFmpeg publishes to MediaMTX |
+| `MEDIAMTX_RTSP_PORT` | RTSP port when using `rtsp` (default `8554`) |
+| `MEDIAMTX_RTSP_URL_HUD` | Full RTSP **publish** URL for **HUD video-only** (quoted). If empty, built from **`MEDIAMTX_*`** when `MEDIAMTX_PUBLISH_PROTOCOL=rtsp` |
+| `MEDIAMTX_RTSP_URL_HUD_KLV` | Optional full RTSP publish URL for **HUD + KLV** when KLV on |
+| `MEDIAMTX_RTSP_URL_RAW` | Optional full RTSP publish URL for raw passthrough |
+| `MEDIAMTX_SRT_URL_HUD` | Full SRT **publish** URL for **HUD video-only** when `MEDIAMTX_PUBLISH_PROTOCOL=srt`. Legacy: `MEDIAMTX_SRT_URL_FIRIS` |
+| `MEDIAMTX_SRT_URL_HUD_KLV` | Optional full SRT publish URL for **HUD + KLV** when using SRT |
+| `MEDIAMTX_PUBLIC_HOST` | Hostname for built URL (e.g. `stream.snstak.com` — must match **TAKWERX** ingest host; see `MEDIAMTX_SNSTAK.md`) |
+| `MEDIAMTX_SRT_PORT` | SRT port when using `srt` (default `8890`) |
+| `MEDIAMTX_PUBLISH_USER` / `MEDIAMTX_PUBLISH_PASS` | MediaMTX internal auth for **publish** |
+| `MEDIAMTX_PUBLISH_PATH_HUD` | Path segment for **video-only** HUD (e.g. `skyscan_roof_sf_cam_hud`). Default: `skyscan_${DEPLOYMENT}_cam_hud` if `DEPLOYMENT` set (**breaking:** this path no longer carries KLV; use **`…_hud_klv`**) |
+| `MEDIAMTX_PUBLISH_PATH_HUD_KLV` | Path for **HUD+KLV** built URL when the protocol-specific full URL is empty |
+| `MEDIAMTX_SRT_URL_RAW` | Optional full SRT URL for raw passthrough when using SRT |
+| `MEDIAMTX_PUBLISH_PATH_RAW` | Path for built raw URL when the protocol-specific full URL is empty |
 | `CAMERA_RTSP_URL` | Optional; if unset, built from `CAMERA_USER`, `CAMERA_PASSWORD`, `CAMERA_IP` |
 
-MediaMTX **publish** URLs are installation-specific. Typical form:
+MediaMTX **publish** URLs are installation-specific. **RTSP** example:
 
-`srt://stream.example.com:8890?streamid=publish:path/cam_hud&pkt_size=1316`
+`rtsp://skyscan_pub:choose_a_long_random_secret@stream.snstak.com:8554/skyscan_roof_sf_cam_hud`
 
-Use your server’s port, **`streamid`**, passphrase, and path naming. HLS consumers read from MediaMTX; the gateway does not publish HLS itself.
+**SRT** example:
+
+`srt://stream.example.com:8890?streamid=#!::m=publish,r=skyscan_roof_sf_cam_hud,u=skyscan_pub,s=choose_a_long_random_secret&pkt_size=1316`
+
+Use your server’s ports, credentials, and path naming. HLS consumers read from MediaMTX; the gateway does not publish HLS itself.
 
 ### MediaMTX internal auth (common gotcha)
 
 If `authInternalUsers` only grants **`publish`** to `user: any` with **`ips: [127.0.0.1]`**, remote publishers get **`authentication failed`** in MediaMTX logs. Do one of the following:
 
-1. **Recommended:** Add a dedicated user with **`action: publish`** (optionally `path: live/...`) and use MediaMTX’s **standard SRT stream ID** so FFmpeg sends credentials:
+1. **Recommended:** Add a dedicated user with **`action: publish`** (set `path:` to match your stream names, e.g. `skyscan_roof_sf_cam_hud`) and use the same credentials in **`MEDIAMTX_PUBLISH_USER`** / **`MEDIAMTX_PUBLISH_PASS`** for **RTSP** or in the SRT streamid for **SRT**:
 
 ```yaml
 authInternalUsers:
@@ -63,15 +81,21 @@ authInternalUsers:
     ips: []
     permissions:
       - action: publish
-        path: live/skyscan_roof_sf_cam_hud
-      # Optional second path if VIDEO_RAW_ENABLE and MEDIAMTX_SRT_URL_RAW are set:
+        path: skyscan_roof_sf_cam_hud
+      - action: publish
+        path: skyscan_roof_sf_cam_hud_klv
+      # Optional third path if VIDEO_RAW_ENABLE and raw publish is configured:
       # - action: publish
-      #   path: live/skyscan_roof_sf_cam_raw
+      #   path: skyscan_roof_sf_cam_raw
 ```
 
-URL (must be **quoted** in `video-gateway.env` so `#` is not a comment):
+**RTSP** URL (must be **quoted** in `video-gateway.env` if `#` appears in the password):
 
-`srt://stream.snstak.com:8890?streamid=#!::m=publish,r=live/skyscan_roof_sf_cam_hud,u=skyscan_pub,s=choose_a_long_random_secret&pkt_size=1316`
+`rtsp://skyscan_pub:choose_a_long_random_secret@stream.snstak.com:8554/skyscan_roof_sf_cam_hud`
+
+**SRT** URL (quote in `.env` so `#` in `streamid` is not a comment):
+
+`srt://stream.snstak.com:8890?streamid=#!::m=publish,r=skyscan_roof_sf_cam_hud,u=skyscan_pub,s=choose_a_long_random_secret&pkt_size=1316`
 
 (Field **`m`** = `publish`, **`r`** = path, **`u`** / **`s`** = user / pass — see [SRT-specific features](https://mediamtx.org/docs/features/srt-specific-features).)
 
@@ -79,7 +103,7 @@ The shorthand `streamid=publish:mypath` does **not** include credentials; it onl
 
 2. Loosen **`authInternalUsers`** so your edge IP (or `ips: []`) may publish on those paths (less ideal).
 
-If you use a **`live/...` path** with **`runOnReady`** relaying to `rtsp://localhost:8554/<name>`**, keep **`r=live/<name>`** in the streamid so the hook runs.
+If you use a **`live/...` path** on the server with **`runOnReady`** relaying to `rtsp://localhost:8554/live/$G1`, set **`MEDIAMTX_PUBLISH_PATH_*`** to include the **`live/`** prefix (e.g. `live/skyscan_roof_sf_cam_hud`) so **`r=`** / RTSP URL paths match. Default SkyScan paths are **`skyscan_<deployment>_cam_*`** without **`live/`**.
 
 ### SRT **read** (viewers: Haivision Play ISR, VLC, etc.)
 
@@ -88,12 +112,12 @@ Publishers use the **`#!::m=publish,r=...,u=...,s=...`** form (see above). **Rea
 | Part | Value |
 |------|--------|
 | action | **`read`** (not `request`) |
-| pathname | e.g. `skyscan_roof_sf_cam_hud` or `live/skyscan_roof_sf_cam_hud` |
+| pathname | e.g. `skyscan_roof_sf_cam_hud` (or `live/skyscan_roof_sf_cam_hud` if you publish under `live/`) |
 | user / pass | include if internal auth requires **read** credentials |
 
 Example **Stream ID** (paste **decoded** — real **colons**, never the literal string `read%3A`):
 
-`read:live/skyscan_roof_sf_cam_hud:SkyScanTAK:SkyScanTAK1234`
+`read:skyscan_roof_sf_cam_hud:SkyScanTAK:SkyScanTAK1234`
 
 Some players accept a single URL; they must **URL-decode** the `streamid` query value before the SRT handshake. If they forward **`read%3A...`** unchanged, MediaMTX logs **`invalid stream ID 'read%3A...'`** — that is always a **reader** bug or mispaste, **not** the SkyScan publisher (which uses `#!::m=publish,...`). Confirmed via `docker exec skyscan-video-gateway-1 printenv MEDIAMTX_SRT_URL_HUD`.
 
@@ -103,24 +127,24 @@ Some players accept a single URL; they must **URL-decode** the `streamid` query 
 
 **`authInternalUsers`** must include **`action: read`** for that path (or global read for that user). **Publish** alone is not enough to play back.
 
-**Path:** readers should usually use **`live/skyscan_roof_sf_cam_hud`** (the SRT publish path). The short relay name **`skyscan_roof_sf_cam_hud`** only has media when **`runOnReady`** is running; otherwise you get *no stream is available*.
+**Path:** readers should use the **same path string** you publish (default **`skyscan_roof_sf_cam_hud`**, or **`live/skyscan_roof_sf_cam_hud`** if you configured `live/`). If the server uses **`runOnReady`** to a short relay name, follow your edge docs; otherwise you may see *no stream is available*.
 
 If the player shows **connected / 1 track H264** but **black picture**:
 
-1. **Transcode** — try **`VIDEO_X264_PROFILE=baseline`** in **[video-gateway.env](../video-gateway.env)**. If you still run **raw** alongside HUD, compare `read:live/skyscan_roof_sf_cam_raw:...` vs the HUD path in the same player to see whether the issue is x264 vs the player.
+1. **Transcode** — try **`VIDEO_X264_PROFILE=baseline`** in **[video-gateway.env](../video-gateway.env)**. If you still run **raw** alongside HUD, compare `read:skyscan_roof_sf_cam_raw:...` vs the HUD path in the same player to see whether the issue is x264 vs the player.
 2. **SRT latency** — append **`&latency=1500`** (or **`2000`**) to the reader URL; some receivers need a larger receive buffer.
-3. **VLC** — open the same SRT URL or **`rtsp://stream.snstak.com:8554/live/skyscan_roof_sf_cam_hud?tcp`** to see if the problem is **Play ISR–specific**.
+3. **VLC** — open the same SRT URL or **`rtsp://stream.snstak.com:8554/skyscan_roof_sf_cam_hud?tcp`** to see if the problem is **Play ISR–specific**.
 4. **MediaMTX** — confirm the path still has an active **publisher** (SkyScan **video-gateway** running) when you read.
 
 ### RTSP MPEG-TS demux (`rtspDemuxMpegts`) and HLS
 
 Tactical / ATAK-style feeds often deliver **H.264 + KLV inside MPEG-TS over RTSP**. MediaMTX cannot serve **HLS** from that wrapped TS as-is; from **v1.17.0** you can set **`pathDefaults.rtspDemuxMpegts: true`** (or per-path **`rtspDemuxMpegts`**) so RTSP publishers are **demuxed** to elementary streams (e.g. H.264, AAC). **HLS** then gets the video/audio tracks; **KLV / metadata** is typically **omitted from HLS** but remains available to **RTSP** readers that want the data PID.
 
-**SkyScan video-gateway** publishes **MPEG-TS over SRT**, not RTSP to MediaMTX, so this setting does not apply to that leg unless you **re-ingest** the same TS over **RTSP** (e.g. after an FFmpeg relay). Use **`rtspDemuxMpegts`** for paths where **publishers connect via RTSP** with TS-wrapped content (TAKICU, ATAK UAS Tool, ISR cameras, etc.).
+**SkyScan video-gateway** publishes to MediaMTX with **RTSP** (`MEDIAMTX_PUBLISH_PROTOCOL=rtsp`, FFmpeg **`-f rtsp`**) or **SRT + MPEG-TS** (`MEDIAMTX_PUBLISH_PROTOCOL=srt`). **`rtspDemuxMpegts`** mainly matters for **TS-in-RTSP** publishers (TAKICU, ATAK UAS Tool, some ISR cameras). SkyScan’s **RTSP publish** leg is typically **elementary H.264** from FFmpeg’s RTSP muxer; **SRT** mode sends **MPEG-TS**. Use server docs to decide if demux flags apply to your path.
 
 ### What healthy MediaMTX logs look like (and common warnings)
 
-After auth and SRT publish succeed you should see **`live/skyscan_roof_sf_cam_hud`** online with **one H264 track** (or two tracks if the server ingests the KLV PID). If raw is enabled, **`live/skyscan_roof_sf_cam_raw`** appears as a second publisher path.
+After auth and publish succeed you should see **`skyscan_roof_sf_cam_hud`** online with **one H264 track**, and when KLV is enabled **`skyscan_roof_sf_cam_hud_klv`** may show **video + data**. If raw is enabled, **`skyscan_roof_sf_cam_raw`** appears as another publisher path.
 
 - **`skipping track 2 (unsupported codec)`** — FFmpeg muxes KLV as an extra **MPEG-TS PID / data** stream. MediaMTX often **ingests only the H.264** track on that path and **drops** the metadata track today. **HUD text is burned into the video**, so clients still see symbology; **ST 0601 sidecar** through this path may be unavailable until the server accepts that stream type or you deliver KLV another way (e.g. separate UDP/CoT or a dedicated archival pipeline).
 

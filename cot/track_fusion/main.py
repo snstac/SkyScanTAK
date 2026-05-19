@@ -31,16 +31,74 @@ SOURCE_LEDGER_TOPIC = os.environ.get(
 ).strip()
 MERGED_LEDGER_TOPIC = os.environ.get("MERGED_LEDGER_TOPIC", "").strip()
 
-# Same env as cot-bridge (`COT_URL`); optional `COT_RX_URL` overrides RX only.
-COT_RX_URL = os.environ.get("COT_RX_URL", "").strip()
+# Same env as cot-bridge (`COT_URL`); optional `COT_RX_URL` or `COT_INPUT_URL` overrides RX only.
+_COT_RX_ENV = os.environ.get("COT_RX_URL", "").strip()
+_COT_INPUT_ENV = os.environ.get("COT_INPUT_URL", "").strip()
+COT_RX_URL = _COT_RX_ENV or _COT_INPUT_ENV
 COT_URL = os.environ.get("COT_URL", "").strip()
 PYTAK_COT_URL = COT_RX_URL or COT_URL
+
+
+def _pytak_rx_url_source() -> str:
+    if _COT_RX_ENV:
+        return "COT_RX_URL"
+    if _COT_INPUT_ENV:
+        return "COT_INPUT_URL"
+    return "COT_URL"
 
 
 def _mask_cot_url(url: str) -> str:
     return _COT_LOG_TOKEN_RE.sub(r"\1<redacted>", url)
 COT_TRACK_TTL_SECONDS = float(os.environ.get("COT_TRACK_TTL_SECONDS", "30"))
 ADS_B_PRIORITY = float(os.environ.get("ADS_B_PRIORITY", "0"))
+
+
+def _parse_exclude_cot_types() -> frozenset[str]:
+    raw = os.environ.get(
+        "COT_LEDGER_EXCLUDE_COT_TYPES",
+        "b-m-p-s-p-e,a-f-G-E-S-E,u-d-f",
+    ).strip()
+    return frozenset(x.strip() for x in raw.split(",") if x.strip())
+
+
+def _parse_exclude_uid_suffixes() -> tuple[str, ...]:
+    raw = os.environ.get(
+        "COT_LEDGER_EXCLUDE_UID_SUFFIXES",
+        "-ping,-fov,-poi",
+    ).strip()
+    return tuple(x.strip().lower() for x in raw.split(",") if x.strip())
+
+
+COT_LEDGER_EXCLUDE_COT_TYPES = _parse_exclude_cot_types()
+COT_LEDGER_EXCLUDE_UID_SUFFIXES = _parse_exclude_uid_suffixes()
+
+
+def _parse_exclude_cot_type_globs() -> tuple[str, ...]:
+    """Ground SIDC globs: unset → defaults; env present but empty → no glob exclusions."""
+    if "COT_LEDGER_EXCLUDE_COT_TYPE_GLOBS" not in os.environ:
+        return ("a-*-G-*", "a-*-G")
+    raw = os.environ.get("COT_LEDGER_EXCLUDE_COT_TYPE_GLOBS", "").strip()
+    if not raw:
+        return ()
+    return tuple(x.strip() for x in raw.split(",") if x.strip())
+
+
+COT_LEDGER_EXCLUDE_COT_TYPE_GLOBS = _parse_exclude_cot_type_globs()
+
+
+def _cot_ledger_ingest_excluded(uid: str, cot_type: str) -> bool:
+    """Drop mapping-sensor / equipment / FOV / bridge markers and ground SIDCs from merged ledger."""
+    t = (cot_type or "").strip()
+    if t in COT_LEDGER_EXCLUDE_COT_TYPES:
+        return True
+    for pat in COT_LEDGER_EXCLUDE_COT_TYPE_GLOBS:
+        if pat and fnmatch.fnmatchcase(t, pat):
+            return True
+    ul = uid.lower()
+    for suf in COT_LEDGER_EXCLUDE_UID_SUFFIXES:
+        if suf and ul.endswith(suf):
+            return True
+    return False
 
 
 def _load_priority_rules() -> list[tuple[str, float]]:
@@ -127,11 +185,11 @@ class CotTrackStore:
         if not uid:
             return
         cot_type = (event.get("type") or "").strip()
+        oid = f"cot-{_sanitize_uid_part(uid)}"
         stale_s = event.get("stale")
         stale_ts = _parse_cot_time(stale_s)
         if stale_ts is not None and stale_ts < now:
             with self._lock:
-                oid = f"cot-{_sanitize_uid_part(uid)}"
                 self._rows.pop(oid, None)
             return
 
@@ -145,6 +203,11 @@ class CotTrackStore:
         except (TypeError, ValueError):
             return
         if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            return
+
+        if _cot_ledger_ingest_excluded(uid, cot_type):
+            with self._lock:
+                self._rows.pop(oid, None)
             return
 
         ev_ts = _parse_cot_time(event.get("time")) or now
@@ -164,7 +227,6 @@ class CotTrackStore:
                 except (TypeError, ValueError):
                     pass
 
-        oid = f"cot-{_sanitize_uid_part(uid)}"
         cot_pri = _cot_priority_for_type(cot_type)
         row: dict[str, Any] = {
             "timestamp": float(ev_ts),
@@ -234,7 +296,8 @@ async def _pytak_rx_loop(
 ) -> None:
     if not PYTAK_COT_URL:
         logging.info(
-            "COT_URL and COT_RX_URL unset; CoT RX disabled (ledger pass-through merge only)"
+            "COT_URL, COT_RX_URL, and COT_INPUT_URL unset; CoT RX disabled "
+            "(ledger pass-through merge only)"
         )
         ready.set()
         return
@@ -242,7 +305,7 @@ async def _pytak_rx_loop(
         logging.info(
             "PyTAK CoT RX using %s (from %s)",
             _mask_cot_url(PYTAK_COT_URL),
-            "COT_RX_URL" if COT_RX_URL else "COT_URL",
+            _pytak_rx_url_source(),
         )
         cp = ConfigParser()
         cp["rx"] = {

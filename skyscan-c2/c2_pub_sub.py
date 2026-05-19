@@ -548,15 +548,47 @@ class C2PubSub(BaseMQTTPubSub):
                                         elif pot_pri < cur_pri:
                                             self.tracked_object = current_target
                                         else:
-                                            distance_improvement_percent = (
-                                                current_target["relative_distance"]
-                                                - potential_target["relative_distance"]
-                                            ) / current_target["relative_distance"]
-                                            if distance_improvement_percent > self.distance_improvement_threshold:
-                                                logging.info(f"Switching Aircraft - Improvement in distance: {distance_improvement_percent} (percent)")
-                                                self.tracked_object = potential_target
+                                            cur_rd = float(
+                                                current_target.get(
+                                                    "relative_distance", 0
+                                                )
+                                                or 0
+                                            )
+                                            pot_rd = float(
+                                                potential_target.get(
+                                                    "relative_distance", 0
+                                                )
+                                                or 0
+                                            )
+                                            if (
+                                                cur_rd > 1e-6
+                                                and not math.isnan(cur_rd)
+                                                and not math.isnan(pot_rd)
+                                            ):
+                                                distance_improvement_percent = (
+                                                    cur_rd - pot_rd
+                                                ) / cur_rd
+                                                if (
+                                                    distance_improvement_percent
+                                                    > self.distance_improvement_threshold
+                                                ):
+                                                    logging.info(
+                                                        "Switching Aircraft - Improvement in distance: "
+                                                        f"{distance_improvement_percent} (percent)"
+                                                    )
+                                                    self.tracked_object = potential_target
+                                                else:
+                                                    self.tracked_object = current_target
                                             else:
-                                                self.tracked_object = current_target
+                                                # Current co-located with sensor (near-zero slant range)
+                                                if pot_rd > 50.0 or pot_pri > cur_pri:
+                                                    logging.info(
+                                                        "Switching target: prefer distant candidate over "
+                                                        "co-located current"
+                                                    )
+                                                    self.tracked_object = potential_target
+                                                else:
+                                                    self.tracked_object = current_target
                                 
                                 # handle the case where the current target is no longer within the criteria
                                 else:

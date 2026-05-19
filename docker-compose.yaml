@@ -52,7 +52,7 @@ services:
       - cot-bridge.env
       - cot-track-fusion.env
     volumes:
-      # Same enrollment + client certs as cot-bridge (shared COT_URL)
+      # Shared PyTAK home: cot-bridge enrolls via COT_URL; fusion may enroll again via COT_RX_URL/COT_INPUT_URL (second client certs on same volume).
       - ./data/cot-bridge-pytak:/root/.pytak
 
   controller:

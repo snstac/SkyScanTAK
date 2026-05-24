@@ -15,6 +15,8 @@ from video.klv_builder import TelemetrySnapshot
 
 _M_TO_FT = 3.280839895
 _M_TO_NM = 0.000539956803
+_MPS_TO_KTS = 1.943844492
+_MPS_TO_FPM = 196.850394
 
 
 def _lat_dm(dec: float) -> str:
@@ -33,6 +35,23 @@ def _lon_dm(dec: float) -> str:
     return f"{deg}°{minutes:07.4f}' {hemi}"
 
 
+def _has_target(s: TelemetrySnapshot) -> bool:
+    return any(
+        (
+            s.tgt_icao,
+            s.tgt_callsign,
+            s.tgt_lat is not None and s.tgt_lon is not None,
+            s.tgt_hae_m is not None,
+            s.tgt_track_deg is not None,
+            s.tgt_gs_mps is not None,
+            s.tgt_squawk,
+            s.tgt_object_type,
+            s.tgt_rel_dist_m is not None,
+            s.slant_range_m is not None,
+        )
+    )
+
+
 def format_hud_text(s: TelemetrySnapshot) -> str:
     """Build multiline OSD text (FIRIS-style clusters). Escape ``:`` for drawtext."""
     tu = s.ts_utc.astimezone(timezone.utc)
@@ -47,26 +66,39 @@ def format_hud_text(s: TelemetrySnapshot) -> str:
         f"ALT {s.sensor_hae_m * _M_TO_FT:.0f} FT",
     ]
 
-    if s.tgt_lat is not None and s.tgt_lon is not None:
+    if _has_target(s):
         lines.append("")
-        lines.append("LRF TARGET")
-        lines.append(_lat_dm(s.tgt_lat))
-        lines.append(_lon_dm(s.tgt_lon))
+        lines.append("TARGET")
+        if s.tgt_icao:
+            lines.append(f"ICAO {s.tgt_icao}")
+        tail = (s.tgt_callsign or "").strip().upper()
+        if tail:
+            lines.append(f"TAIL/CS {tail}")
         if s.tgt_hae_m is not None:
-            lines.append(f"ELV {s.tgt_hae_m * _M_TO_FT:.0f} FT")
-        if s.slant_range_m is not None:
-            lines.append(f"SLT {s.slant_range_m * _M_TO_NM:.1f} NM")
+            lines.append(f"ALT {s.tgt_hae_m * _M_TO_FT:.0f} FT")
+        if s.tgt_track_deg is not None:
+            lines.append(f"BRG {s.tgt_track_deg:03.0f} T")
+        if s.tgt_gs_mps is not None:
+            lines.append(f"GS {s.tgt_gs_mps * _MPS_TO_KTS:.0f} KT")
+        if s.tgt_vs_mps is not None and abs(s.tgt_vs_mps) >= 0.5:
+            lines.append(f"VS {s.tgt_vs_mps * _MPS_TO_FPM:+.0f} FPM")
+        if s.tgt_squawk:
+            lines.append(f"SQK {s.tgt_squawk.strip().upper()}")
+        rng_m = s.tgt_rel_dist_m
+        if rng_m is None:
+            rng_m = s.slant_range_m
+        if rng_m is not None:
+            lines.append(f"RNG {rng_m * _M_TO_NM:.1f} NM")
+        if s.tgt_object_type:
+            lines.append(f"TYP {s.tgt_object_type.strip().upper()}")
+        if s.tgt_lat is not None and s.tgt_lon is not None:
+            lines.append("")
+            lines.append("TGT POS")
+            lines.append(_lat_dm(s.tgt_lat))
+            lines.append(_lon_dm(s.tgt_lon))
     elif s.slant_range_m is not None:
         lines.append("")
         lines.append(f"SLT {s.slant_range_m * _M_TO_NM:.1f} NM")
-
-    if s.tgt_callsign or s.tgt_id:
-        cs = (s.tgt_callsign or "").strip().upper()
-        tid = (s.tgt_id or "").strip().upper()
-        tag = f"{cs} {tid}".strip()
-        if tag:
-            lines.append("")
-            lines.append(f"TRACK {tag}")
 
     if s.rho_deg is not None and s.tau_deg is not None:
         lines.append("")

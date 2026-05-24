@@ -14,6 +14,7 @@ from video.hud import format_hud_text
 from video.klv_builder import TelemetrySnapshot, build_uas_packet
 from video.parse import (
     coerce_float,
+    extract_icao_hex,
     parse_camera_pointing,
     parse_selected_object,
     str_clean,
@@ -87,15 +88,25 @@ def snapshot() -> TelemetrySnapshot:
         )
 
     tgt_lat = tgt_lon = tgt_hae = None
-    tgt_id = tgt_cs = None
+    tgt_cs = tgt_icao = None
+    tgt_track = tgt_gs = tgt_vs = tgt_rel = None
+    tgt_squawk = tgt_object_type = None
     if obj:
         tgt_lat = coerce_float(obj.get("latitude"))
         tgt_lon = coerce_float(obj.get("longitude"))
         tgt_hae = coerce_float(obj.get("altitude"))
-        oid = obj.get("object_id")
-        if oid is not None:
-            tgt_id = str(oid)
+        tgt_track = coerce_float(obj.get("track"))
+        tgt_gs = coerce_float(obj.get("horizontal_velocity"))
+        tgt_vs = coerce_float(obj.get("vertical_velocity"))
+        tgt_rel = coerce_float(obj.get("relative_distance"))
+        if tgt_rel is None:
+            tgt_rel = coerce_float(obj.get("distance_3d"))
         tgt_cs = str_clean(obj.get("flight")) or None
+        tgt_squawk = str_clean(obj.get("squawk")) or None
+        tgt_object_type = str_clean(obj.get("object_type")) or None
+        if not tgt_object_type:
+            tgt_object_type = str_clean(obj.get("cot_event_type")) or None
+        tgt_icao = extract_icao_hex(obj.get("object_id"))
 
     slant = dist_log
     if (
@@ -126,8 +137,14 @@ def snapshot() -> TelemetrySnapshot:
         tgt_lat=tgt_lat,
         tgt_lon=tgt_lon,
         tgt_hae_m=tgt_hae,
-        tgt_id=tgt_id,
         tgt_callsign=tgt_cs,
+        tgt_icao=tgt_icao,
+        tgt_track_deg=tgt_track,
+        tgt_gs_mps=tgt_gs,
+        tgt_vs_mps=tgt_vs,
+        tgt_squawk=tgt_squawk,
+        tgt_object_type=tgt_object_type,
+        tgt_rel_dist_m=tgt_rel,
     )
 
 

@@ -283,6 +283,19 @@ class C2PubSub(BaseMQTTPubSub):
             logging.error(f"Error: {e} latitude: {self.varphi_o}, longitude: {self.lambda_o}, altitude: {self.h_o}")
             return 0.0, 0.0, 0.0
 
+    @staticmethod
+    def _ledger_str_field(row: pd.Series, key: str) -> str | None:
+        """Optional string field from object-ledger row (ADS-B / CoT extras)."""
+        if key not in row.index:
+            return None
+        val = row[key]
+        if pd.isna(val):
+            return None
+        s = str(val).strip()
+        if not s or s.lower() == "nan":
+            return None
+        return s
+
     def _relative_distance_meters(
         self: Any, lat_one: float, lon_one: float, lat_two: float, lon_two: float
     ) -> float:
@@ -612,24 +625,36 @@ class C2PubSub(BaseMQTTPubSub):
                     logging.debug(
                         f"Payload ready, is override: {self.override_object is not None} or is standard: {self.override_object is None}"
                     )
+                    t = self.tracked_object
+                    data: Dict[str, Any] = {
+                        "object_id": str(t.name),
+                        "object_type": str(t["object_type"]),
+                        "timestamp": float(t["timestamp"]),
+                        "latitude": float(t["latitude"]),
+                        "longitude": float(t["longitude"]),
+                        "altitude": float(t["altitude"]),
+                        "track": float(t["track"]),
+                        "horizontal_velocity": float(t["horizontal_velocity"]),
+                        "vertical_velocity": float(t["vertical_velocity"]),
+                        "relative_distance": float(t["relative_distance"]),
+                        "camera_tilt": float(t["camera_tilt"]),
+                        "camera_pan": float(t["camera_pan"]),
+                        "distance_3d": float(t["distance_3d"]),
+                        "age": float(t["age"]),
+                    }
+                    for key in (
+                        "flight",
+                        "squawk",
+                        "category",
+                        "emergency",
+                        "cot_event_type",
+                    ):
+                        extra = self._ledger_str_field(t, key)
+                        if extra is not None:
+                            data[key] = extra
                     payload = {
-                        "timestamp": float(self.tracked_object["timestamp"]),
-                        "data": {
-                            "object_id": str(self.tracked_object.name),
-                            "object_type": str(self.tracked_object["object_type"]),
-                            "timestamp": float(self.tracked_object["timestamp"]),
-                            "latitude": float(self.tracked_object["latitude"]),
-                            "longitude": float(self.tracked_object["longitude"]),
-                            "altitude": float(self.tracked_object["altitude"]),
-                            "track": float(self.tracked_object["track"]),
-                            "horizontal_velocity": float(self.tracked_object["horizontal_velocity"]),
-                            "vertical_velocity": float(self.tracked_object["vertical_velocity"]),
-                            "relative_distance": float(self.tracked_object["relative_distance"]),
-                            "camera_tilt": float(self.tracked_object["camera_tilt"]),
-                            "camera_pan": float(self.tracked_object["camera_pan"]),
-                            "distance_3d": float(self.tracked_object["distance_3d"]),
-                            "age": float(self.tracked_object["age"]),
-                        },
+                        "timestamp": float(t["timestamp"]),
+                        "data": data,
                     }
                     logging.debug(f"This is the selected target {payload}")
 

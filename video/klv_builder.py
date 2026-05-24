@@ -53,8 +53,14 @@ class TelemetrySnapshot:
     tgt_lat: float | None
     tgt_lon: float | None
     tgt_hae_m: float | None
-    tgt_id: str | None
     tgt_callsign: str | None
+    tgt_icao: str | None
+    tgt_track_deg: float | None
+    tgt_gs_mps: float | None
+    tgt_vs_mps: float | None
+    tgt_squawk: str | None
+    tgt_object_type: str | None
+    tgt_rel_dist_m: float | None
 
 
 def _bytes(el: Any) -> bytes:

@@ -3,7 +3,29 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Mapping
+
+_HEX_RE = re.compile(r"[0-9a-fA-F]")
+
+
+def extract_icao_hex(object_id: Any) -> str | None:
+    """Mode-S / ICAO hex from object_id (e.g. cot-icao-a1c90e → A1C90E, else last 6 hex)."""
+    if object_id is None:
+        return None
+    s = str(object_id).strip()
+    if not s:
+        return None
+    low = s.lower()
+    if low.startswith("cot-icao-"):
+        part = s[9:].strip()
+        return part.upper() if part else None
+    hex_chars = _HEX_RE.findall(s)
+    if len(hex_chars) >= 6:
+        return "".join(hex_chars[-6:]).upper()
+    if hex_chars:
+        return "".join(hex_chars).upper()
+    return None
 
 
 def extract_logger_inner(outer: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -38,6 +60,24 @@ def parse_camera_pointing(payload: str) -> dict[str, Any] | None:
     return cp
 
 
+def _parse_selected_object_inner(raw: Any) -> dict[str, Any] | None:
+    if isinstance(raw, str):
+        rs = raw.strip()
+        if not rs or rs == "{}":
+            return None
+        try:
+            inner = json.loads(raw)
+        except json.JSONDecodeError:
+            return None
+    elif isinstance(raw, dict):
+        inner = raw if raw else None
+    else:
+        return None
+    if not isinstance(inner, dict) or not inner:
+        return None
+    return inner
+
+
 def parse_selected_object(payload: str) -> dict[str, Any] | None:
     try:
         outer = json.loads(payload)
@@ -45,23 +85,13 @@ def parse_selected_object(payload: str) -> dict[str, Any] | None:
         return None
     if not isinstance(outer, dict):
         return None
-    inner: Any = None
+    inner: dict[str, Any] | None = None
     if outer.get("data_payload_type") == "Selected Object":
-        raw = outer.get("data_payload")
-        if isinstance(raw, str):
-            rs = raw.strip()
-            if not rs or rs == "{}":
-                return None
-            try:
-                inner = json.loads(raw)
-            except json.JSONDecodeError:
-                return None
-        elif isinstance(raw, dict):
-            inner = raw if raw else None
+        inner = _parse_selected_object_inner(outer.get("data_payload"))
+    if inner is None and "Selected Object" in outer:
+        inner = _parse_selected_object_inner(outer["Selected Object"])
     if inner is None and "object_id" in outer and "latitude" in outer:
         inner = outer
-    if not isinstance(inner, dict) or not inner:
-        return None
     return inner
 
 

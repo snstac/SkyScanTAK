@@ -126,7 +126,10 @@ COT_FOV_STALE_SECONDS = (
 COT_FOV_UID = os.environ.get("COT_FOV_UID", "").strip() or f"{COT_UID}-fov"
 COT_FOV_HOW = os.environ.get("COT_FOV_HOW", "h-e").strip()
 COT_FOV_POINT_CE_MARGIN = float(os.environ.get("COT_FOV_POINT_CE_MARGIN", "50"))
-COT_FOV_CALLSIGN = os.environ.get("COT_FOV_CALLSIGN", "SkyScan FOV").strip()
+_COT_FOV_CS_RAW = os.environ.get("COT_FOV_CALLSIGN", "").strip()
+COT_FOV_CALLSIGN = _COT_FOV_CS_RAW or (
+    f"{COT_CALLSIGN} FOV" if COT_CALLSIGN else "SkyScan FOV"
+)
 COT_FOV_FILL_COLOR = os.environ.get("COT_FOV_FILL_COLOR", "-1761607681").strip()
 COT_FOV_STROKE_COLOR = os.environ.get("COT_FOV_STROKE_COLOR", "-1").strip()
 COT_FOV_STROKE_WEIGHT = os.environ.get("COT_FOV_STROKE_WEIGHT", "3.0").strip()

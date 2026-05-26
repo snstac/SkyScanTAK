@@ -1,3 +1,5 @@
 paho-mqtt==2.1.0
 # tak:// enrollment + tls:// CoT stream need cryptography and aiohttp
 pytak[with-crypto,with-aiohttp]==7.3.7
+astropy>=6.0,<7
+numpy>=1.23,<2

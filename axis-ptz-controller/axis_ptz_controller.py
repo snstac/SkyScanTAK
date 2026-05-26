@@ -66,6 +66,8 @@ class AxisPtzController(BaseMQTTPubSub):
         tripod_yaw: float = 0.0,
         tripod_pitch: float = 0.0,
         tripod_roll: float = 0.0,
+        boresight_offset_az_deg: float = 0.0,
+        boresight_offset_el_deg: float = 0.0,
         pan_gain: float = 0.2,
         pan_derivative_gain_max: float = 10.0,
         pan_rate_max: float = 150.0,
@@ -89,6 +91,7 @@ class AxisPtzController(BaseMQTTPubSub):
         log_to_mqtt: bool = False,
         log_level: str = "INFO",
         continue_on_exception: bool = False,
+        pose_log_interval: float = 1.0,
         **kwargs: Any,
     ):
         """Instantiate the PTZ controller by connecting to the camera
@@ -225,6 +228,10 @@ class AxisPtzController(BaseMQTTPubSub):
         self.log_to_mqtt = log_to_mqtt
         self.log_level = log_level
         self.continue_on_exception = continue_on_exception
+        self.boresight_offset_az_deg = boresight_offset_az_deg
+        self.boresight_offset_el_deg = boresight_offset_el_deg
+        self.pose_log_interval = max(0.0, float(pose_log_interval))
+        self.last_pose_log_time = 0.0
 
         # Always construct camera configuration and control since
         # instantiation only assigns arguments
@@ -559,6 +566,8 @@ class AxisPtzController(BaseMQTTPubSub):
             "tripod_yaw": self.camera.tripod_yaw,
             "tripod_pitch": self.camera.tripod_pitch,
             "tripod_roll": self.camera.tripod_roll,
+            "boresight_offset_az_deg": self.boresight_offset_az_deg,
+            "boresight_offset_el_deg": self.boresight_offset_el_deg,
             "pan_gain": self.pan_gain,
             "pan_derivative_gain_max": self.pan_derivative_gain_max,
             "tilt_gain": self.tilt_gain,
@@ -587,6 +596,14 @@ class AxisPtzController(BaseMQTTPubSub):
             f"AxisPtzController configuration:\n{json.dumps(config, indent=4)}"
         )
 
+    def _commanded_rho_tau(self) -> tuple[float, float]:
+        """Model pointing plus boresight offsets (same for slew and rate loop)."""
+        if self.object is None:
+            return 0.0, 0.0
+        return (
+            self.object.rho + self.boresight_offset_az_deg,
+            self.object.tau + self.boresight_offset_el_deg,
+        )
 
     def _track_object(self, time_since_last_update: float) -> None:
         if self.status != Status.TRACKING:
@@ -621,12 +638,13 @@ class AxisPtzController(BaseMQTTPubSub):
         # and it there is latency and jitter in how long it takes.
         self.object.recompute_location()
 
-        # Compute angle delta between camera and object pan and tilt
+        # Compute angle delta between camera and commanded pan/tilt (model + boresight)
+        rho_cmd, tau_cmd = self._commanded_rho_tau()
         self.delta_rho = axis_ptz_utilities.compute_angle_delta(
-            self.camera.rho, self.object.rho
+            self.camera.rho, rho_cmd
         )
         self.delta_tau = axis_ptz_utilities.compute_angle_delta(
-            self.camera.tau, self.object.tau
+            self.camera.tau, tau_cmd
         )
 
         # Compute slew rate differences
@@ -765,6 +783,51 @@ class AxisPtzController(BaseMQTTPubSub):
             )
             self.publish_to_topic(self.logger_topic, logger_msg)
 
+    def _publish_camera_pose_logger(self) -> None:
+        """Publish actual camera PTZ (get_ptz) for CoT bridge — not model pointing."""
+        if not self.log_to_mqtt or not self.use_camera:
+            return
+        try:
+            rho_c, tau_c, zoom_c, focus_c = self.camera.get_ptz()
+        except Exception as e:
+            logging.warning("Pose logger get_ptz failed: %s", e)
+            return
+        oid = self.object.object_id if self.object is not None else None
+        dist = (
+            self.object.distance_to_tripod3d
+            if self.object is not None
+            else None
+        )
+        payload = {
+            "camera-pointing": {
+                "rho_c": rho_c,
+                "tau_c": tau_c,
+                "zoom": zoom_c,
+                "focus": focus_c,
+                "object_id": oid,
+                "distance": dist,
+                "source": "camera_ptz",
+            }
+        }
+        logger_msg = self.generate_payload_json(
+            push_timestamp=int(datetime.utcnow().timestamp()),
+            device_type=os.environ.get("DEVICE_TYPE", "Collector"),
+            id_=self.hostname,
+            deployment_id=os.environ.get(
+                "DEPLOYMENT_ID", f"Unknown-Location-{self.hostname}"
+            ),
+            current_location=os.environ.get(
+                "CURRENT_LOCATION",
+                f"{self.camera.tripod_latitude}, {self.camera.tripod_longitude}",
+            ),
+            status="Debug",
+            message_type="Event",
+            model_version="null",
+            firmware_version="v0.0.0",
+            data_payload_type="Logger",
+            data_payload=json.dumps(payload),
+        )
+        self.publish_to_topic(self.logger_topic, logger_msg)
 
     def _slew_camera(self, rho_target: float, tau_target: float) -> None:
         if self.status == Status.SLEWING:
@@ -867,7 +930,8 @@ class AxisPtzController(BaseMQTTPubSub):
             logging.info(f"Tracking object: {self.object.object_id}")
 
             if self.use_camera:
-                self._slew_camera(self.object.rho, self.object.tau)
+                rho_target, tau_target = self._commanded_rho_tau()
+                self._slew_camera(rho_target, tau_target)
                 return
         else:
             self.object.update_from_msg(data)
@@ -1133,6 +1197,14 @@ class AxisPtzController(BaseMQTTPubSub):
                 if self.use_mqtt:
                     schedule.run_pending()
 
+                now = time()
+                if (
+                    self.pose_log_interval > 0
+                    and now - self.last_pose_log_time >= self.pose_log_interval
+                ):
+                    self.last_pose_log_time = now
+                    self._publish_camera_pose_logger()
+
                 # Update camera pointing
                 sleep(self.loop_interval)
                 if not self.use_camera:
@@ -1229,6 +1301,8 @@ def make_controller() -> AxisPtzController:
         tripod_yaw=float(os.environ.get("TRIPOD_YAW", 0.0)),
         tripod_pitch=float(os.environ.get("TRIPOD_PITCH", 0.0)),
         tripod_roll=float(os.environ.get("TRIPOD_ROLL", 0.0)),
+        boresight_offset_az_deg=float(os.environ.get("BORESIGHT_OFFSET_AZ_DEG", 0.0)),
+        boresight_offset_el_deg=float(os.environ.get("BORESIGHT_OFFSET_EL_DEG", 0.0)),
         pan_gain=float(os.environ.get("PAN_GAIN", 0.2)),
         pan_derivative_gain_max=float(os.environ.get("PAN_DERIVATIVE_GAIN_MAX", 10.0)),
         pan_rate_max=float(os.environ.get("PAN_RATE_MAX", 150.0)),
@@ -1254,6 +1328,7 @@ def make_controller() -> AxisPtzController:
         continue_on_exception=ast.literal_eval(
             os.environ.get("CONTINUE_ON_EXCEPTION", "False")
         ),
+        pose_log_interval=float(os.environ.get("POSE_LOG_INTERVAL", "1.0")),
     )
 
 

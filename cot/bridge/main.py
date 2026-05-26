@@ -19,6 +19,16 @@ from typing import Any, Mapping
 import paho.mqtt.client as mqtt
 import pytak
 
+import cot_video
+from cot_video import (
+    URL_FORMAT_RAW,
+    add_video_link_to_detail,
+    build_video_endpoint_event,
+    resolve_read_stream_url,
+    sensor_video_link_url,
+)
+from lib.equatorial import equatorial_from_tripod_los
+
 LOGGER_TOPIC = os.environ.get("LOGGER_TOPIC", "")
 OBJECT_TOPIC = os.environ.get("OBJECT_TOPIC", "").strip()
 MQTT_IP = os.environ.get("MQTT_IP", "mqtt")
@@ -134,6 +144,29 @@ COT_FOV_FILL_COLOR = os.environ.get("COT_FOV_FILL_COLOR", "-1761607681").strip()
 COT_FOV_STROKE_COLOR = os.environ.get("COT_FOV_STROKE_COLOR", "-1").strip()
 COT_FOV_STROKE_WEIGHT = os.environ.get("COT_FOV_STROKE_WEIGHT", "3.0").strip()
 
+# ATAK video feed CoT (b-i-v endpoint + __video link on mapping sensor)
+_COT_VIDEO_EN = os.environ.get("COT_VIDEO_ENABLE", "false").strip().lower()
+COT_VIDEO_ENABLE = _COT_VIDEO_EN in ("1", "true", "yes", "on")
+COT_VIDEO_STREAM_URL = os.environ.get("COT_VIDEO_STREAM_URL", "").strip()
+COT_VIDEO_PUBLIC_HOST = os.environ.get("COT_VIDEO_PUBLIC_HOST", "").strip()
+COT_VIDEO_READ_USER = os.environ.get("COT_VIDEO_READ_USER", "").strip()
+COT_VIDEO_READ_PASS = os.environ.get("COT_VIDEO_READ_PASS", "").strip()
+COT_VIDEO_PATH = os.environ.get("COT_VIDEO_PATH", "").strip()
+COT_VIDEO_UID_SUFFIX = os.environ.get("COT_VIDEO_UID_SUFFIX", "-video").strip() or "-video"
+_COT_VIDEO_CS = os.environ.get("COT_VIDEO_CALLSIGN", "").strip()
+COT_VIDEO_CALLSIGN = _COT_VIDEO_CS or (
+    f"{COT_CALLSIGN} HUD" if COT_CALLSIGN else "SkyScan HUD"
+)
+COT_VIDEO_URL_FORMAT = os.environ.get("COT_VIDEO_URL_FORMAT", "takx").strip().lower()
+COT_VIDEO_PATH_STYLE = os.environ.get("COT_VIDEO_PATH_STYLE", "leading_slash").strip().lower()
+COT_VIDEO_RTSP_RELIABLE = int(os.environ.get("COT_VIDEO_RTSP_RELIABLE", "1"))
+COT_VIDEO_STALE_SECONDS = int(os.environ.get("COT_VIDEO_STALE_SECONDS", "3600"))
+# b-i-v endpoint is large and static; refresh periodically, not every PTZ pose (avoids PyTAK queue overload).
+COT_VIDEO_REFRESH_INTERVAL = float(os.environ.get("COT_VIDEO_REFRESH_INTERVAL", "90"))
+_COT_VIDEO_INC_URL = os.environ.get("COT_VIDEO_INCLUDE_URL_ATTRIBUTE", "false").strip().lower()
+COT_VIDEO_INCLUDE_URL_ATTRIBUTE = _COT_VIDEO_INC_URL in ("1", "true", "yes", "on")
+COT_VIDEO_COT_TYPE = os.environ.get("COT_VIDEO_COT_TYPE", cot_video.DEFAULT_VIDEO_COT_TYPE).strip()
+
 EARTH_RADIUS_M = 6371008.8
 
 _state_lock = threading.Lock()
@@ -143,6 +176,7 @@ _last_zoom: int | None = None
 _last_distance: float | None = None
 _last_object_id: str | None = None
 _last_send_mon = 0.0
+_last_video_send_mon = 0.0
 _min_send_period = (
     1.0 / COT_MAX_SEND_RATE if COT_MAX_SEND_RATE > 0 else 0.0
 )
@@ -154,6 +188,9 @@ _min_air_send_period = (
 _pytak_lock = threading.Lock()
 _pytak_loop: asyncio.AbstractEventLoop | None = None
 _pytak_tx_queue: asyncio.Queue | None = None
+_pytak_restart_lock = threading.Lock()
+_last_pytak_restart_mon = 0.0
+PYTAK_RESTART_COOLDOWN_SEC = float(os.environ.get("PYTAK_RESTART_COOLDOWN_SEC", "30"))
 
 
 def _pytak_section() -> SectionProxy:
@@ -166,7 +203,8 @@ def _pytak_section() -> SectionProxy:
         "PYTAK_MULTICAST_TTL": str(COT_MULTICAST_TTL),
         "PYTAK_NO_HELLO": "true",
         "TAK_PROTO": "0",
-        "MAX_OUT_QUEUE": "500",
+        "MAX_IN_QUEUE": os.environ.get("PYTAK_MAX_IN_QUEUE", "10000"),
+        "MAX_OUT_QUEUE": os.environ.get("PYTAK_MAX_OUT_QUEUE", "2000"),
     }
     return cp["skyscan"]
 
@@ -228,22 +266,59 @@ def _start_pytak_sender() -> None:
             raise RuntimeError("PyTAK loop/queue not initialized")
 
 
+def _restart_pytak_sender() -> bool:
+    """Restart PyTAK when the background event loop has exited (rate-limited)."""
+    global _pytak_loop, _pytak_tx_queue, _last_pytak_restart_mon
+    now_m = time.monotonic()
+    if now_m - _last_pytak_restart_mon < PYTAK_RESTART_COOLDOWN_SEC:
+        return False
+    with _pytak_restart_lock:
+        if now_m - _last_pytak_restart_mon < PYTAK_RESTART_COOLDOWN_SEC:
+            return False
+        with _pytak_lock:
+            _pytak_loop = None
+            _pytak_tx_queue = None
+        try:
+            _start_pytak_sender()
+            _last_pytak_restart_mon = now_m
+            logging.info("PyTAK sender restarted after event loop closed")
+            return True
+        except Exception as exc:
+            logging.error("PyTAK restart failed: %s", exc)
+            return False
+
+
 def _send_cot(xml: str) -> None:
     data = xml.encode("utf-8")
+
+    def _put(loop: asyncio.AbstractEventLoop, txq: asyncio.Queue) -> None:
+        def _enqueue() -> None:
+            try:
+                txq.put_nowait(data)
+            except asyncio.QueueFull:
+                logging.warning("PyTAK TX queue full; dropping CoT event")
+
+        try:
+            loop.call_soon_threadsafe(_enqueue)
+        except RuntimeError as e:
+            logging.warning("PyTAK send failed (%s); dropping CoT (%d bytes)", e, len(data))
+
     with _pytak_lock:
         loop = _pytak_loop
         txq = _pytak_tx_queue
     if loop is None or txq is None:
         logging.warning("PyTAK not ready; dropping CoT (%d bytes)", len(data))
         return
-
-    def _put() -> None:
-        try:
-            txq.put_nowait(data)
-        except asyncio.QueueFull:
-            logging.warning("PyTAK TX queue full; dropping CoT event")
-
-    loop.call_soon_threadsafe(_put)
+    if loop.is_closed():
+        logging.warning("PyTAK event loop closed; attempting restart")
+        if _restart_pytak_sender():
+            with _pytak_lock:
+                loop = _pytak_loop
+                txq = _pytak_tx_queue
+            if loop is not None and txq is not None and not loop.is_closed():
+                _put(loop, txq)
+        return
+    _put(loop, txq)
 
 
 def _utc_cot_time(dt: datetime) -> str:
@@ -266,6 +341,81 @@ def _norm_azimuth(deg: float) -> float:
 
 def _clamp_elevation(deg: float) -> float:
     return round(max(-90.0, min(90.0, float(deg))), 5)
+
+
+def _equatorial_for_pose(azimuth: float, elevation: float) -> dict[str, float] | None:
+    return equatorial_from_tripod_los(
+        lat=TRIPOD_LAT,
+        lon=TRIPOD_LON,
+        alt_m=TRIPOD_ALT,
+        az_deg=azimuth,
+        el_deg=elevation,
+        timestamp=time.time(),
+    )
+
+
+def _equatorial_remarks_suffix(equatorial: dict[str, float] | None) -> str:
+    if not equatorial:
+        return ""
+    ra = equatorial.get("ra_deg")
+    dec = equatorial.get("dec_deg")
+    if ra is None or dec is None:
+        return ""
+    return f" RA={float(ra):.2f} Dec={float(dec):+.2f}"
+
+
+def _cot_video_path_default() -> str:
+    if COT_VIDEO_PATH:
+        return COT_VIDEO_PATH
+    path = os.environ.get("MEDIAMTX_PUBLISH_PATH_HUD", "").strip()
+    if path:
+        return path
+    dep = os.environ.get("DEPLOYMENT", "").strip()
+    if dep:
+        return f"skyscan_{dep}_cam_hud"
+    return ""
+
+
+def _resolve_cot_video_stream_url() -> str | None:
+    if COT_VIDEO_STREAM_URL:
+        return COT_VIDEO_STREAM_URL
+    mtx_hud = os.environ.get("MEDIAMTX_RTSP_URL_HUD", "").strip()
+    if mtx_hud:
+        return mtx_hud
+    host = COT_VIDEO_PUBLIC_HOST or os.environ.get("MEDIAMTX_PUBLIC_HOST", "").strip()
+    user = COT_VIDEO_READ_USER or os.environ.get("MEDIAMTX_PUBLISH_USER", "").strip()
+    password = COT_VIDEO_READ_PASS or os.environ.get("MEDIAMTX_PUBLISH_PASS", "").strip()
+    path = _cot_video_path_default()
+    if not host or not path or not user or not password:
+        return None
+    try:
+        port = int(os.environ.get("MEDIAMTX_RTSP_PORT", "8554"))
+    except ValueError:
+        port = 8554
+    return resolve_read_stream_url(
+        {
+            "public_host": host,
+            "path": path,
+            "read_user": user,
+            "read_pass": password,
+            "rtsp_port": port,
+            "scheme": "rtsp",
+        }
+    )
+
+
+def _sensor_video_link_stream_url(stream_url: str) -> str | None:
+    try:
+        parsed = cot_video.parse_rtsp_url(stream_url)
+    except ValueError:
+        return None
+    if COT_VIDEO_URL_FORMAT == URL_FORMAT_RAW or COT_VIDEO_INCLUDE_URL_ATTRIBUTE:
+        return sensor_video_link_url(
+            parsed,
+            url_format=COT_VIDEO_URL_FORMAT,
+            stream_url=stream_url,
+        )
+    return None
 
 
 def _clamp_fov_schema_deg(d: float) -> float:
@@ -683,6 +833,9 @@ def build_sensor_cot(
     remarks_extra: str = "",
     zoom: int | None = None,
     distance_m: float | None = None,
+    equatorial: dict[str, float] | None = None,
+    video_link_uid: str | None = None,
+    video_stream_url: str | None = None,
 ) -> str:
     now = datetime.now(timezone.utc)
     stale = now + timedelta(seconds=COT_STALE_SECONDS)
@@ -722,7 +875,21 @@ def build_sensor_cot(
     ET.SubElement(detail, "sensor", sensor_attrs)
 
     remarks_parts = [remarks_extra.strip()] if remarks_extra else []
-    ET.SubElement(detail, "remarks").text = " ".join(p for p in remarks_parts if p) or "SkyScan PTZ"
+    eq_suffix = _equatorial_remarks_suffix(equatorial)
+    if eq_suffix and remarks_parts:
+        remarks_parts[0] = (remarks_parts[0] + eq_suffix).strip()
+    elif eq_suffix:
+        remarks_parts.append(eq_suffix.strip())
+    ET.SubElement(detail, "remarks").text = (
+        " ".join(p for p in remarks_parts if p) or "SkyScan PTZ"
+    )
+
+    if video_link_uid:
+        add_video_link_to_detail(
+            detail,
+            video_link_uid,
+            stream_url=video_stream_url,
+        )
 
     body = ET.tostring(event, encoding="unicode")
     return (
@@ -920,6 +1087,27 @@ def build_fov_polygon_cot(
     )
 
 
+def _emit_video_endpoint_cot(stream_url: str, video_uid: str) -> None:
+    """Emit b-i-v video endpoint CoT (rate-limited separately from PTZ pose updates)."""
+    try:
+        vid = build_video_endpoint_event(
+            video_uid=video_uid,
+            callsign=COT_VIDEO_CALLSIGN,
+            stream_url=stream_url,
+            lat=TRIPOD_LAT,
+            lon=TRIPOD_LON,
+            hae=TRIPOD_ALT,
+            stale_sec=COT_VIDEO_STALE_SECONDS,
+            rtsp_reliable=COT_VIDEO_RTSP_RELIABLE,
+            cot_type=COT_VIDEO_COT_TYPE,
+            url_format=COT_VIDEO_URL_FORMAT,
+            path_style=COT_VIDEO_PATH_STYLE,
+        ).decode("utf-8")
+        _send_cot("<?xml version='1.0' encoding='UTF-8' standalone='yes'?>\n" + vid)
+    except Exception as e:
+        logging.error("Video endpoint CoT build/send failed: %s", e)
+
+
 def _emit_pose(
     azimuth: float,
     elevation: float,
@@ -929,7 +1117,7 @@ def _emit_pose(
     zoom: int | None = None,
     distance_m: float | None = None,
 ) -> None:
-    global _last_send_mon
+    global _last_send_mon, _last_video_send_mon
     with _state_lock:
         zm = _last_zoom if zoom is None else zoom
         dm = _last_distance if distance_m is None else distance_m
@@ -938,15 +1126,29 @@ def _emit_pose(
         if (now_m - _last_send_mon) < _min_send_period:
             return
     _last_send_mon = now_m
-    if COT_SENSOR_ENABLE:
-        xml = build_sensor_cot(
-            azimuth,
-            elevation,
-            remarks_extra=remarks,
-            zoom=zm,
-            distance_m=dm,
-        )
-        _send_cot(xml)
+
+    equatorial = _equatorial_for_pose(azimuth, elevation)
+    stream_url: str | None = None
+    video_uid: str | None = None
+    sensor_video_url: str | None = None
+    if COT_VIDEO_ENABLE:
+        stream_url = _resolve_cot_video_stream_url()
+        if stream_url:
+            video_uid = f"{COT_UID}{COT_VIDEO_UID_SUFFIX}"
+            sensor_video_url = _sensor_video_link_stream_url(stream_url)
+            refresh_video = (
+                COT_VIDEO_REFRESH_INTERVAL <= 0
+                or (now_m - _last_video_send_mon) >= COT_VIDEO_REFRESH_INTERVAL
+            )
+            if refresh_video:
+                _emit_video_endpoint_cot(stream_url, video_uid)
+                _last_video_send_mon = now_m
+        elif force:
+            logging.warning(
+                "COT_VIDEO_ENABLE set but no stream URL (set COT_VIDEO_STREAM_URL or MediaMTX vars)"
+            )
+
+    # FOV before mapping sensor so a saturated TX queue still prefers the ground polygon.
     if COT_FOV_ENABLE:
         try:
             fov_xml = build_fov_polygon_cot(
@@ -959,6 +1161,19 @@ def _emit_pose(
                 _send_cot(fov_xml)
         except Exception as e:
             logging.error("FOV polygon CoT build/send failed: %s", e)
+
+    if COT_SENSOR_ENABLE:
+        xml = build_sensor_cot(
+            azimuth,
+            elevation,
+            remarks_extra=remarks,
+            zoom=zm,
+            distance_m=dm,
+            equatorial=equatorial,
+            video_link_uid=video_uid,
+            video_stream_url=sensor_video_url,
+        )
+        _send_cot(xml)
 
 
 def _emit_air_spi(obj: Mapping[str, Any]) -> None:
@@ -991,11 +1206,15 @@ def _on_logger_message(
     cp = _parse_camera_pointing(text)
     if not cp:
         return
+    # CoT pose uses actual camera PTZ (rho_c/tau_c from get_ptz), never model rho_o/tau_o.
     try:
         rho = float(cp["rho_c"])
         tau = float(cp["tau_c"])
     except (KeyError, TypeError, ValueError):
-        logging.warning("Logger camera-pointing missing rho_c/tau_c: %s", cp.keys())
+        logging.warning(
+            "Logger camera-pointing missing rho_c/tau_c (actual camera PTZ): %s",
+            cp.keys(),
+        )
         return
 
     oid = cp.get("object_id")
@@ -1153,6 +1372,15 @@ def main() -> None:
             "FOV ground polygon -> CoT type u-d-f format=%s uid=%s (TAKX-friendly; same PyTAK destination)",
             COT_FOV_FORMAT,
             COT_FOV_UID,
+        )
+    if COT_VIDEO_ENABLE:
+        vurl = _resolve_cot_video_stream_url()
+        logging.info(
+            "ATAK video CoT enabled uid=%s%s url_format=%s refresh_interval=%.0fs",
+            f"{COT_UID}{COT_VIDEO_UID_SUFFIX}",
+            f" stream={_cot_url_for_logs(vurl)}" if vurl else " (no stream URL resolved)",
+            COT_VIDEO_URL_FORMAT,
+            COT_VIDEO_REFRESH_INTERVAL,
         )
     if not COT_SENSOR_ENABLE and not COT_FOV_ENABLE:
         logging.warning(

@@ -26,8 +26,11 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
+# Python packaging lib/ (not SkyScan project helpers at repo root)
 lib64/
+# Allow project lib/ used by skyscan-c2, cot-bridge, scripts
+!/lib/
+!/lib/**
 parts/
 sdist/
 var/

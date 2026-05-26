@@ -44,9 +44,27 @@ A lightweight marker CoT (default type `b-m-p-s-m`, `how=h-g-i-g-o`) is sent eve
 
 Every **`COT_EQUIP_INTERVAL`** seconds (default 60), the bridge sends a second CoT using **`COT_EQUIP_TYPE`** (default **`a-f-G-E-S-E`**, friendly ground equipment / sensor / electro-optical) with the **same `COT_UID`** as the mapping-sensor stream, Tripod **`point`**, and a **`<sensor>`** block with current `rho_c`/`tau_c`-equivalent azimuth/elevation, the same FOV/range/modality rules as the mapping feed. One initial event is sent at startup. Set **`COT_EQUIP_INTERVAL=0`** to disable.
 
+## ATAK video feed CoT (`b-i-v`)
+
+When **`COT_VIDEO_ENABLE=true`**, the bridge emits a **`b-i-v`** video endpoint CoT with **`ConnectionEntry`** (RTSP) on a refresh interval (**`COT_VIDEO_REFRESH_INTERVAL`**, default 90s), plus **`<__video uid="…"/>`** on every mapping-sensor pose update so [ATAK CivTAK](https://github.com/TAK-Product-Center/atak-civ) can open the HUD stream from the map marker. Pattern matches [PaintWave `paintwavecot`](https://github.com/snstac/paintwave/blob/main/docs/TAK_COT.md#video-feed-cot-atak).
+
+| Env | Meaning |
+|-----|---------|
+| **`COT_VIDEO_ENABLE`** | `true` enables video endpoint + sensor link (default **`false`**). |
+| **`COT_VIDEO_STREAM_URL`** | Full RTSP read URL; if unset, built from **`MEDIAMTX_*`** (via [`video-gateway.env`](../video-gateway.env) in compose). |
+| **`COT_VIDEO_URL_FORMAT`** | **`takx`** (default), **`raw`**, **`embedded`**, or **`credential_free`**. |
+| **`COT_VIDEO_CALLSIGN`** | Contact on **`b-i-v`** event (default `{COT_CALLSIGN} HUD`). |
+| **`COT_VIDEO_UID_SUFFIX`** | Video uid = `{COT_UID}{suffix}` (default **`-video`**). |
+| **`COT_VIDEO_STALE_SECONDS`** | Video endpoint stale time (default **3600**). |
+| **`COT_VIDEO_REFRESH_INTERVAL`** | How often to re-send **`b-i-v`** (default **90**). Pose updates still refresh sensor + FOV. |
+
+Requires **video-gateway** publishing live HUD to MediaMTX (`skyscan_<deployment>_cam_hud`). Mapping-sensor **remarks** append **`RA=… Dec=…`** when equatorial boresight is computable (same inputs as HUD RA/Dec).
+
 ## EdgeTech Logger payload
 
 The axis-ptz-controller publishes when `LOG_TO_MQTT=True` ([`axis-ptz-controller.env`](../../axis-ptz-controller.env)). Messages are JSON with an outer EdgeTech wrapper and an inner **`camera-pointing`** object.
+
+**Pose source:** CoT azimuth/elevation always come from **`rho_c` / `tau_c`** (actual Axis `get_ptz` pan/tilt). Model angles (`rho_o`, `tau_o`, `rho_camera_o`) are ignored. With **`POSE_LOG_INTERVAL`** (default 1s), the controller publishes camera PTZ even when not tracking aircraft, so CoT stays current during manual moves and idle.
 
 The bridge accepts either envelope style:
 

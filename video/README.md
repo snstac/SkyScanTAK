@@ -11,6 +11,8 @@ Telemetry for HUD + KLV comes from the same MQTT topics as the rest of SkyScan: 
 
 **HUD position:** set `VIDEO_HUD_Y` in [`video-gateway.env`](../video-gateway.env) (default **20** in `entrypoint.sh`; **100** recommended when Axis burns in positioning debug at the top of the frame). Tripod position for slant range and KLV “sensor” fields is taken from `TRIPOD_LATITUDE`, `TRIPOD_LONGITUDE`, `TRIPOD_ALTITUDE`.
 
+**Equatorial HUD (RA/Dec):** When camera pointing (`rho_c`/`tau_c`) and tripod position are available, the burned-in OSD adds boresight **RA**, **DEC**, and galactic **L/B** after the LOS az/el block (PaintWave / FIRIS-style). Disable with **`VIDEO_HUD_RADEC_ENABLE=false`**. Uses [astropy](https://www.astropy.org/) (`lib/equatorial.py`). See also [PaintWave SkyScanTAK integration](https://github.com/snstac/paintwave/blob/main/docs/SKYSCANTAK_INTEGRATION.md).
+
 **HUD appearance:** Reference stills (e.g. [KDRV](https://bloximages.newyork1.vip.townnews.com/kdrv.com/content/tncms/assets/v3/editorial/6/3b/63bb3a85-9cb2-5761-beb0-92730a1315fa/627aa64a1049c.image.jpg), [KRCR FIRIS2](https://krcrtv.com/resources/media2/16x9/723/986/1x0/90/432c80bc-639f-4bd4-aad2-7266b16d8235-FIRIS2.PNG)) show **phosphor / neon green** symbology (`#39FF14`-class), **all-caps monospace**, **no translucent panel** (text painted on the picture), corner-cluster copy (platform LLA, **LRF TARGET** block with coordinates, **SLT** in **NM**, **ALT/ELV** in **FT**), plus red **ARMED** alerts on some aircraft systems—we only render telemetry we have (no fake ARMED). Tunables are in **[`video-gateway.env`](../video-gateway.env)** (`VIDEO_HUD_*`; **[`entrypoint.sh`](./entrypoint.sh)** builds the `drawtext` filter).
 
 ## ATAK-CIV / UAS Tool (video + MISB ST 0601 KLV)

@@ -289,7 +289,7 @@ The different EdgeTech modules used for SkyScan communicate with each other via 
             <td>/skyscan/<i>DEPLOYMENT</i>/Manual_Override/skyscan-c2/JSON</td>
             <td></td>
             <td>skyscan-c2</td>
-            <td>ObjectIDOverride</td>
+            <td>ObjectIDOverride or CalibrationWaypoint</td>
         </tr>
         <tr>
             <td>OBJECT_DETECTION_TOPIC</td>

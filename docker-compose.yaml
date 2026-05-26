@@ -90,26 +90,29 @@ services:
     networks:
       - skyscan
     build:
-      context: ./cot/bridge
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: cot/bridge/Dockerfile
     volumes:
       # PyTAK TAK enrollment client cert + passphrase cache (~/.pytak)
       - ./data/cot-bridge-pytak:/root/.pytak
     restart: unless-stopped
     depends_on:
       - mqtt
+      - controller
     env_file:
-      - .env
+      - video-gateway.env
       - cot-bridge.env
+      - .env
 
   skyscan-c2:
     networks:
       - skyscan
     build:
-      context: ./skyscan-c2
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: skyscan-c2/Dockerfile
     volumes:
       - ./data/mapping:/data/mapping
+      - ./config:/config:ro
     restart: unless-stopped
     depends_on:
       - mqtt
@@ -128,8 +131,8 @@ services:
     networks:
       - skyscan
     build:
-      context: ./video
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: video/Dockerfile
     restart: unless-stopped
     depends_on:
       - mqtt

@@ -61,6 +61,10 @@ class TelemetrySnapshot:
     tgt_squawk: str | None
     tgt_object_type: str | None
     tgt_rel_dist_m: float | None
+    ra_deg: float | None = None
+    dec_deg: float | None = None
+    galactic_l_deg: float | None = None
+    galactic_b_deg: float | None = None
 
 
 def _bytes(el: Any) -> bytes:

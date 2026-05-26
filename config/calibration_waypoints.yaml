@@ -1,0 +1,10 @@
+waypoints:
+  - id: sutro_tower
+    label: Sutro Tower (San Francisco)
+    lat: 37.75525
+    lon: -122.45289
+    alt_m: 297
+    known_good: true
+    notes: Field lock 2026-05-26 OSD 74.51/1.60; EL offset +2.5 deg from field lock (0.7703)
+    calibrated_boresight_az_deg: -23.1149
+    calibrated_boresight_el_deg: 0.7703

@@ -19,6 +19,7 @@ import numpy as np
 
 import axis_ptz_utilities
 from base_mqtt_pub_sub import BaseMQTTPubSub
+from lib.calibration_waypoints import get_waypoint, waypoint_offsets
 
 
 class C2PubSub(BaseMQTTPubSub):
@@ -47,6 +48,7 @@ class C2PubSub(BaseMQTTPubSub):
         mapping_filepath: str,
         object_distance_threshold: str,
         distance_improvement_threshold: float,
+        calibration_waypoints_file: str,
         device_latitude: str,
         device_longitude: str,
         device_altitude: str,
@@ -83,6 +85,7 @@ class C2PubSub(BaseMQTTPubSub):
         self.mapping_filepath = mapping_filepath
         self.object_distance_threshold = float(object_distance_threshold)
         self.distance_improvement_threshold = float(distance_improvement_threshold)
+        self.calibration_waypoints_file = calibration_waypoints_file
         self.min_tilt = min_tilt
         self.max_tilt = max_tilt
         self.min_altitude = min_altitude
@@ -102,6 +105,7 @@ class C2PubSub(BaseMQTTPubSub):
         self.log_level = log_level
         self.override_object = None
         self.tracked_object = None
+        self.calibration_waypoint_id: str | None = None
 
         if self.mapping_filepath == "":
             self.occlusion_mapping_enabled = False
@@ -170,6 +174,7 @@ class C2PubSub(BaseMQTTPubSub):
     mapping_filepath = {mapping_filepath}
     object_distance_threshold = {object_distance_threshold}
     distance_improvement_threshold = {distance_improvement_threshold}
+    calibration_waypoints_file = {calibration_waypoints_file}
     device_latitude = {device_latitude}
     device_longitude = {device_longitude}
     device_altitude = {device_altitude}
@@ -179,6 +184,94 @@ class C2PubSub(BaseMQTTPubSub):
     log_level = {log_level}
             """
         )
+
+    def _calibration_waypoint_path(self) -> str:
+        configured = (self.calibration_waypoints_file or "").strip()
+        if configured:
+            return configured
+        return "/config/calibration_waypoints.yaml"
+
+    def _resolve_calibration_waypoint(self) -> dict[str, Any] | None:
+        waypoint_id = (self.calibration_waypoint_id or "").strip()
+        if not waypoint_id:
+            return None
+        path = self._calibration_waypoint_path()
+        waypoint = get_waypoint(path, waypoint_id)
+        if waypoint is None:
+            logging.warning("Calibration waypoint %s not found in %s", waypoint_id, path)
+            return None
+        return waypoint
+
+    def _build_calibration_selected_object(
+        self, waypoint: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        now = time()
+        synthetic = {
+            "timestamp": now,
+            "latitude": float(waypoint["lat"]),
+            "longitude": float(waypoint["lon"]),
+            "altitude": float(waypoint.get("alt_m", 0.0)),
+            "track": 0.0,
+            "horizontal_velocity": 0.0,
+            "vertical_velocity": 0.0,
+        }
+        cam_pan, cam_tilt, distance_3d = self._calculate_camera_angles(synthetic)
+        if cam_pan == 0.0 and cam_tilt == 0.0 and distance_3d == 0.0:
+            return None
+
+        az_offset, el_offset = waypoint_offsets(waypoint)
+        cam_pan += az_offset
+        cam_tilt += el_offset
+        relative_distance = self._relative_distance_meters(
+            self.device_latitude,
+            self.device_longitude,
+            synthetic["latitude"],
+            synthetic["longitude"],
+        )
+        waypoint_id = str(waypoint.get("id", "waypoint"))
+        return {
+            "object_id": f"cal-{waypoint_id}",
+            "object_type": "calibration_waypoint",
+            "timestamp": now,
+            "latitude": synthetic["latitude"],
+            "longitude": synthetic["longitude"],
+            "altitude": synthetic["altitude"],
+            "track": 0.0,
+            "horizontal_velocity": 0.0,
+            "vertical_velocity": 0.0,
+            "relative_distance": float(relative_distance),
+            "camera_tilt": float(cam_tilt),
+            "camera_pan": float(cam_pan),
+            "distance_3d": float(distance_3d),
+            "age": 0.0,
+            "callsign": str(waypoint.get("label", waypoint_id)),
+        }
+
+    def _publish_selected_object(self, payload_data: dict[str, Any]) -> None:
+        out_json = self.generate_payload_json(
+            push_timestamp=str(int(datetime.utcnow().timestamp())),
+            device_type="Collector",
+            id_=self.hostname,
+            deployment_id=f"ShipScan-{self.hostname}",
+            current_location="-90, -180",
+            status="Debug",
+            message_type="Event",
+            model_version="null",
+            firmware_version="v0.0.0",
+            data_payload_type="Selected Object",
+            data_payload=json.dumps(payload_data),
+        )
+        success = self.publish_to_topic(self.object_topic, out_json)
+        if success:
+            logging.debug(
+                "Successfully sent data: %s on topic: %s",
+                out_json,
+                self.object_topic,
+            )
+        else:
+            logging.warning(
+                "Failed to send data: %s on topic: %s", out_json, self.object_topic
+            )
 
     def _calculate_camera_angles(self: Any, data: Any) -> tuple[float, float, float]:
         # Calculate the relative tilt and pan angles of the object compared to the device
@@ -441,6 +534,33 @@ class C2PubSub(BaseMQTTPubSub):
     ) -> None:
         payload_dict = json.loads(str(msg.payload.decode("utf-8")))
 
+        if "CalibrationWaypoint" in payload_dict:
+            value = payload_dict["CalibrationWaypoint"]
+            if value in (None, ""):
+                self.calibration_waypoint_id = None
+                self.tracked_object = None
+                logging.info("Cleared calibration waypoint mode")
+            else:
+                self.calibration_waypoint_id = str(value).strip()
+                self.tracked_object = None
+                logging.info(
+                    "Calibration waypoint set to: %s", self.calibration_waypoint_id
+                )
+
+        if "ObjectIDOverride" in payload_dict.keys():
+            self.override_object = str(payload_dict["ObjectIDOverride"])
+            logging.info(f"Override object set to: {self.override_object}")
+
+        if self.calibration_waypoint_id:
+            waypoint = self._resolve_calibration_waypoint()
+            payload = (
+                self._build_calibration_selected_object(waypoint)
+                if waypoint is not None
+                else None
+            )
+            self._publish_selected_object(payload or {})
+            return
+
         if "ObjectLedger" in payload_dict.keys():
             object_ledger_json = payload_dict["ObjectLedger"]
             object_ledger_df = pd.read_json(
@@ -658,53 +778,9 @@ class C2PubSub(BaseMQTTPubSub):
                     }
                     logging.debug(f"This is the selected target {payload}")
 
-                    out_json = self.generate_payload_json(
-                        push_timestamp=str(int(datetime.utcnow().timestamp())),
-                        device_type="Collector",
-                        id_=self.hostname,
-                        deployment_id=f"ShipScan-{self.hostname}",
-                        current_location="-90, -180",
-                        status="Debug",
-                        message_type="Event",
-                        model_version="null",
-                        firmware_version="v0.0.0",
-                        data_payload_type="Selected Object",
-                        data_payload=json.dumps(payload["data"]),
-                    )
-
-                    success = self.publish_to_topic(self.object_topic, out_json)
-                    if success:
-                        logging.debug(
-                            f"Successfully sent data: {out_json} on topic: {self.object_topic}"
-                        )
-                    else:
-                        logging.warning(
-                            f"Failed to send data: {out_json} on topic: {self.object_topic}"
-                        )
+                    self._publish_selected_object(payload["data"])
                 else:
-                    out_json = self.generate_payload_json(
-                        push_timestamp=str(int(datetime.utcnow().timestamp())),
-                        device_type="Collector",
-                        id_=self.hostname,
-                        deployment_id=f"ShipScan-{self.hostname}",
-                        current_location="-90, -180",
-                        status="Debug",
-                        message_type="Event",
-                        model_version="null",
-                        firmware_version="v0.0.0",
-                        data_payload_type="Selected Object",
-                        data_payload=json.dumps({}),
-                    )
-
-                    success = self.publish_to_topic(self.object_topic, out_json)
-                    if success:
-                        logging.debug(
-                            f"Successfully sent data: {out_json} on topic: {self.object_topic}"
-                        )
-                    else:
-                        logging.warning(
-                            f"Failed to send data: {out_json} on topic: {self.object_topic}"
-                        )
+                    self._publish_selected_object({})
 
 
                 out_json = self.generate_payload_json(
@@ -732,9 +808,6 @@ class C2PubSub(BaseMQTTPubSub):
                     logging.warning(
                         f"Failed to send data: {out_json} on topic: {self.object_topic}"
                         )
-        if "ObjectIDOverride" in payload_dict.keys():
-            self.override_object = str(payload_dict["ObjectIDOverride"])
-            logging.info(f"Override object set to: {self.override_object}")
             ### end here
 
     def main(self: Any) -> None:
@@ -772,6 +845,9 @@ if __name__ == "__main__":
         object_topic=str(os.environ.get("OBJECT_TOPIC")),
         prioritized_ledger_topic=str(os.environ.get("PRIORITIZED_LEDGER_TOPIC")),
         manual_override_topic=str(os.environ.get("MANUAL_OVERRIDE_TOPIC")),
+        calibration_waypoints_file=str(
+            os.environ.get("CALIBRATION_WAYPOINTS_FILE", "/config/calibration_waypoints.yaml")
+        ),
         device_latitude=float(os.environ.get("TRIPOD_LATITUDE")),
         device_longitude=float(os.environ.get("TRIPOD_LONGITUDE")),
         device_altitude=float(os.environ.get("TRIPOD_ALTITUDE")),

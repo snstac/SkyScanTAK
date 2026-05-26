@@ -104,6 +104,18 @@ def format_hud_text(s: TelemetrySnapshot) -> str:
         lines.append("")
         lines.append(f"LOS AZ {s.rho_deg:6.1f}  EL {s.tau_deg:+5.1f} DEG")
 
+    if s.ra_deg is not None and s.dec_deg is not None:
+        lines.append(f"RA {s.ra_deg:7.2f} DEG")
+        lines.append(f"DEC {s.dec_deg:+6.2f} DEG")
+        if s.galactic_l_deg is not None and s.galactic_b_deg is not None:
+            gl = float(s.galactic_l_deg)
+            gb = float(s.galactic_b_deg)
+            gl_sign = "+" if gl >= 0 else ""
+            gb_sign = "+" if gb >= 0 else ""
+            lines.append(
+                f"GAL L {gl_sign}{abs(gl):5.0f} B {gb_sign}{abs(gb):4.0f}"
+            )
+
     if s.hfov_deg is not None:
         lines.append(f"HFOV {s.hfov_deg:4.1f} DEG")
 

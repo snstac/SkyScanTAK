@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 
 import paho.mqtt.client as mqtt
 
+from lib.equatorial import equatorial_from_tripod_los
 from video.geo import slant_range_m
 from video.hud import format_hud_text
 from video.klv_builder import TelemetrySnapshot, build_uas_packet
@@ -26,6 +27,12 @@ HUD_PATH = os.environ.get("VIDEO_HUD_PATH", "/tmp/skyscan_hud.txt").strip()
 KLV_FIFO = os.environ.get("VIDEO_KLV_FIFO", "/tmp/skyscan_klv.fifo").strip()
 KLV_RATE_HZ = float(os.environ.get("VIDEO_KLV_RATE", "10"))
 VIDEO_KLV_ENABLE = os.environ.get("VIDEO_KLV_ENABLE", "false").lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+VIDEO_HUD_RADEC_ENABLE = os.environ.get("VIDEO_HUD_RADEC_ENABLE", "true").lower() in (
     "1",
     "true",
     "yes",
@@ -122,6 +129,23 @@ def snapshot() -> TelemetrySnapshot:
     rho_k = _norm_az(rho) if rho is not None else None
     tau_k = _clamp_elev(tau) if tau is not None else None
 
+    ra_deg = dec_deg = gal_l = gal_b = None
+    if VIDEO_HUD_RADEC_ENABLE and rho_k is not None and tau_k is not None:
+        ts = datetime.now(timezone.utc).timestamp()
+        eq = equatorial_from_tripod_los(
+            lat=TRIPOD_LAT,
+            lon=TRIPOD_LON,
+            alt_m=TRIPOD_ALT,
+            az_deg=rho_k,
+            el_deg=tau_k,
+            timestamp=ts,
+        )
+        if eq:
+            ra_deg = eq.get("ra_deg")
+            dec_deg = eq.get("dec_deg")
+            gal_l = eq.get("galactic_l_deg")
+            gal_b = eq.get("galactic_b_deg")
+
     return TelemetrySnapshot(
         ts_utc=datetime.now(timezone.utc),
         deployment=DEPLOYMENT,
@@ -145,6 +169,10 @@ def snapshot() -> TelemetrySnapshot:
         tgt_squawk=tgt_squawk,
         tgt_object_type=tgt_object_type,
         tgt_rel_dist_m=tgt_rel,
+        ra_deg=ra_deg,
+        dec_deg=dec_deg,
+        galactic_l_deg=gal_l,
+        galactic_b_deg=gal_b,
     )
 
 

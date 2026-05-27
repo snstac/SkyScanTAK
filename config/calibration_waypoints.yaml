@@ -8,3 +8,13 @@ waypoints:
     notes: Field lock 2026-05-26 OSD 74.51/1.60; EL offset +2.5 deg from field lock (0.7703)
     calibrated_boresight_az_deg: -23.1149
     calibrated_boresight_el_deg: 0.7703
+
+  - id: mill_valley_qmv
+    label: Mill Valley FAA Radar Site (QMV)
+    lat: 37.92397
+    lon: -122.59718
+    alt_m: 723
+    known_good: true
+    notes: Field lock 2026-05-27 OSD -48.07/-2.84 rho/tau -48.07/-2.84; vs Sutro AZ -23.1149 EL +0.7703 (delta +0.7527/-5.3846); per-waypoint audit only (global boresight unchanged)
+    calibrated_boresight_az_deg: -22.3622
+    calibrated_boresight_el_deg: -4.6143

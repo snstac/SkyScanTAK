@@ -155,6 +155,72 @@ def _run_in_controller(
     return json.loads(line)
 
 
+def _global_boresight_from_env(axis_env: Path) -> tuple[float, float] | None:
+    text = axis_env.read_text(encoding="utf-8") if axis_env.exists() else ""
+    az = el = None
+    for line in text.splitlines():
+        if line.startswith("BORESIGHT_OFFSET_AZ_DEG="):
+            az = float(line.split("=", 1)[1].strip())
+        elif line.startswith("BORESIGHT_OFFSET_EL_DEG="):
+            el = float(line.split("=", 1)[1].strip())
+    if az is None or el is None:
+        return None
+    return az, el
+
+
+def _print_sutro_comparison(result, wp_path: Path, axis_env: Path) -> None:
+    sutro = get_waypoint(str(wp_path), "sutro_tower")
+    global_off = _global_boresight_from_env(axis_env)
+    if sutro is None and global_off is None:
+        return
+    print("\nComparison to Sutro / global:")
+    if sutro is not None:
+        s_az = float(sutro.get("calibrated_boresight_az_deg", 0) or 0)
+        s_el = float(sutro.get("calibrated_boresight_el_deg", 0) or 0)
+        print(f"  Sutro YAML offsets:     AZ={s_az:+.4f}° EL={s_el:+.4f}°")
+        print(
+            f"  Delta (this - Sutro):   AZ={result.offset_az_deg - s_az:+.4f}° "
+            f"EL={result.offset_el_deg - s_el:+.4f}°"
+        )
+    if global_off is not None:
+        g_az, g_el = global_off
+        print(f"  Global env offsets:     AZ={g_az:+.4f}° EL={g_el:+.4f}°")
+        d_az = abs(result.offset_az_deg - g_az)
+        d_el = abs(result.offset_el_deg - g_el)
+        if d_az <= 2.0 and d_el <= 2.0:
+            print("  Within ~2° of global — no env update required.")
+        else:
+            print(
+                "  Differs from global by >2° — keep per-waypoint YAML; "
+                "do not overwrite global without averaging or re-locking Sutro."
+            )
+
+
+def _build_waypoint_notes(result, wp_path: Path, *, yaml_only: bool) -> str:
+    from datetime import datetime, timezone
+
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    base = (
+        f"Field lock {stamp} OSD {result.az_observed:.2f}/{result.el_observed:.2f} "
+        f"rho/tau {result.rho_observed:.2f}/{result.tau_observed:.2f}"
+    )
+    sutro = get_waypoint(str(wp_path), "sutro_tower")
+    if sutro is not None:
+        s_az = float(sutro.get("calibrated_boresight_az_deg", 0) or 0)
+        s_el = float(sutro.get("calibrated_boresight_el_deg", 0) or 0)
+        d_az = result.offset_az_deg - s_az
+        d_el = result.offset_el_deg - s_el
+        base += (
+            f"; vs Sutro AZ {s_az:+.4f} EL {s_el:+.4f} "
+            f"(delta {d_az:+.4f}/{d_el:+.4f})"
+        )
+    if yaml_only:
+        base += "; per-waypoint audit only (global boresight unchanged)"
+    else:
+        base += "; offsets in axis-ptz-controller.env"
+    return base
+
+
 def _print_report(result) -> None:
     print(f"Waypoint: {result.waypoint_id}")
     print(
@@ -185,12 +251,19 @@ def main() -> int:
         default=str(REPO_ROOT / "config" / "calibration_waypoints.yaml"),
     )
     parser.add_argument("--container", default="skyscan-controller-1")
-    parser.add_argument("--write", action="store_true", help="Update env + waypoint YAML")
+    parser.add_argument("--write", action="store_true", help="Persist calibration results")
+    parser.add_argument(
+        "--yaml-only",
+        action="store_true",
+        help="With --write: update waypoint YAML only (do not change axis-ptz-controller.env)",
+    )
     parser.add_argument(
         "--axis-env",
         default=str(REPO_ROOT / "axis-ptz-controller.env"),
     )
     args = parser.parse_args()
+    if args.yaml_only and not args.write:
+        raise SystemExit("--yaml-only requires --write")
 
     wp_path = Path(args.waypoints_file)
     waypoint = get_waypoint(str(wp_path), args.waypoint)
@@ -226,12 +299,10 @@ def main() -> int:
     )
 
     _print_report(result)
+    _print_sutro_comparison(result, wp_path, Path(args.axis_env))
 
     if args.write:
-        axis_env = Path(args.axis_env)
-        update_axis_ptz_env(
-            axis_env, result.offset_az_deg, result.offset_el_deg
-        )
+        notes = _build_waypoint_notes(result, wp_path, yaml_only=args.yaml_only)
         update_waypoint_yaml(
             wp_path,
             args.waypoint,
@@ -241,12 +312,20 @@ def main() -> int:
             osd_el=result.el_observed,
             rho_observed=result.rho_observed,
             tau_observed=result.tau_observed,
+            notes=notes,
         )
-        print(f"\nWrote {axis_env} and {wp_path}")
-        print(
-            "Reload controller: docker compose build controller && "
-            "docker compose up -d controller"
-        )
+        if args.yaml_only:
+            print(f"\nWrote {wp_path} only (global boresight unchanged).")
+        else:
+            axis_env = Path(args.axis_env)
+            update_axis_ptz_env(
+                axis_env, result.offset_az_deg, result.offset_el_deg
+            )
+            print(f"\nWrote {axis_env} and {wp_path}")
+            print(
+                "Reload controller: docker compose build controller && "
+                "docker compose up -d controller"
+            )
     else:
         print("\nDry run (no files changed). Re-run with --write to persist.")
 

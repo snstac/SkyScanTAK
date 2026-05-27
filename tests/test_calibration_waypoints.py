@@ -21,6 +21,14 @@ def test_get_sutro_waypoint():
     assert float(waypoint["lon"]) == -122.45289
 
 
+def test_get_mill_valley_qmv_waypoint():
+    waypoint = get_waypoint(str(WAYPOINTS_FILE), "mill_valley_qmv")
+    assert waypoint is not None
+    assert float(waypoint["lat"]) == 37.92397
+    assert float(waypoint["lon"]) == -122.59718
+    assert float(waypoint["alt_m"]) == 723
+
+
 def test_waypoint_offsets_default_to_zero():
     waypoint = {"id": "sutro_tower"}
     az, el = waypoint_offsets(waypoint)

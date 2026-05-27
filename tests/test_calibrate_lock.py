@@ -40,6 +40,59 @@ def test_update_axis_ptz_env_sets_boresight_keys(tmp_path):
     assert "BORESIGHT_OFFSET_EL_DEG=-1.7297" in text
 
 
+def test_update_waypoint_yaml_custom_notes(tmp_path):
+    yaml_path = tmp_path / "calibration_waypoints.yaml"
+    yaml_path.write_text(
+        "waypoints:\n  - id: mill_valley_qmv\n    lat: 37.92\n    lon: -122.59\n    alt_m: 723\n",
+        encoding="utf-8",
+    )
+    update_waypoint_yaml(
+        yaml_path,
+        "mill_valley_qmv",
+        offset_az=-22.3622,
+        offset_el=-4.6143,
+        osd_az=-48.07,
+        osd_el=-2.84,
+        rho_observed=-48.07,
+        tau_observed=-2.84,
+        notes="per-waypoint audit only",
+    )
+    wp = get_waypoint(str(yaml_path), "mill_valley_qmv")
+    assert wp["notes"] == "per-waypoint audit only"
+    assert wp["calibrated_boresight_az_deg"] == -22.3622
+
+
+def test_yaml_only_write_leaves_env_unchanged(tmp_path):
+    """Simulate --yaml-only: waypoint YAML updates without touching env."""
+    env_path = tmp_path / "axis-ptz-controller.env"
+    env_path.write_text(
+        "BORESIGHT_OFFSET_AZ_DEG=-23.1149\nBORESIGHT_OFFSET_EL_DEG=0.7703\n",
+        encoding="utf-8",
+    )
+    yaml_path = tmp_path / "calibration_waypoints.yaml"
+    yaml_path.write_text(
+        "waypoints:\n"
+        "  - id: sutro_tower\n    lat: 1\n    lon: 2\n    alt_m: 3\n"
+        "  - id: mill_valley_qmv\n    lat: 4\n    lon: 5\n    alt_m: 6\n",
+        encoding="utf-8",
+    )
+    before = env_path.read_text(encoding="utf-8")
+    update_waypoint_yaml(
+        yaml_path,
+        "mill_valley_qmv",
+        offset_az=-22.3622,
+        offset_el=-4.6143,
+        osd_az=-48.07,
+        osd_el=-2.84,
+        rho_observed=-48.07,
+        tau_observed=-2.84,
+        notes="yaml-only test",
+    )
+    assert env_path.read_text(encoding="utf-8") == before
+    sutro = get_waypoint(str(yaml_path), "sutro_tower")
+    assert "calibrated_boresight" not in sutro or sutro.get("known_good") is not True
+
+
 def test_update_waypoint_yaml_known_good_and_offsets(tmp_path):
     yaml_path = tmp_path / "calibration_waypoints.yaml"
     yaml_path.write_text(

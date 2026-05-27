@@ -82,12 +82,13 @@ def update_waypoint_yaml(
     osd_el: float,
     rho_observed: float,
     tau_observed: float,
+    notes: str | None = None,
 ) -> None:
     """Update or append waypoint calibration audit fields in YAML."""
     waypoints = load_waypoints(str(path))
     found = False
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    note = (
+    note = notes or (
         f"Field lock {stamp} OSD {osd_az:.2f}/{osd_el:.2f} "
         f"rho/tau {rho_observed:.2f}/{tau_observed:.2f}; "
         f"offsets in axis-ptz-controller.env"

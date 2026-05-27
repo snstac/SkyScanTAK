@@ -1,6 +1,6 @@
 # Calibration Waypoints
 
-This workflow lets you slew the camera to a known landmark (for example `sutro_tower`) using the same C2 `Selected Object` pipeline used for live tracking.
+This workflow lets you slew the camera to a known landmark (for example `sutro_tower` or `mill_valley_qmv`) using the same C2 `Selected Object` pipeline used for live tracking.
 
 ## Files and settings
 
@@ -43,7 +43,32 @@ python scripts/slew_calibration_waypoint.py --id sutro_tower --mqtt-host 127.0.0
 
 Controller logs should show `Absolute move to pan: ~74.51` (model rho ~97.6° plus `BORESIGHT_OFFSET_AZ_DEG` ~ -23.1°).
 
-**Verified (roof_sf, 2026-05-26):** field lock OSD 74.51/1.6 → offsets AZ -23.1149°, EL -1.7297°; `CalibrationWaypoint: sutro_tower` slews dead-on without manual pan.
+**Verified (roof_sf, 2026-05-26):** field lock OSD 74.51/1.6 → offsets AZ -23.1149°, EL +0.7703° (global); `CalibrationWaypoint: sutro_tower` slews dead-on without manual pan.
+
+## Two-point calibration (Sutro + QMV)
+
+Use a second landmark to validate that boresight error is uniform across the sky. **roof_sf** catalog:
+
+| Waypoint | Field lock OSD | Computed offsets (AZ / EL) | Global env |
+|----------|----------------|----------------------------|------------|
+| `sutro_tower` | 74.51° / 1.60° | -23.1149° / +0.7703° | **yes** (tracking) |
+| `mill_valley_qmv` | -48.07° / -2.84° | -22.3622° / -4.6143° | audit only |
+
+QMV dry-run (2026-05-27): azimuth offset within ~0.75° of Sutro; elevation differs by ~5.4°. **Keep Sutro offsets in `axis-ptz-controller.env`**; store QMV offsets in YAML only so Sutro auto-slew stays correct.
+
+Record a second site without changing global env:
+
+```bash
+python3 scripts/calibrate_from_camera_lock.py \
+  --waypoint mill_valley_qmv --osd-az -48.07 --osd-el -2.84
+
+python3 scripts/calibrate_from_camera_lock.py \
+  --waypoint mill_valley_qmv --osd-az -48.07 --osd-el -2.84 --write --yaml-only
+```
+
+`--yaml-only` updates only the named waypoint in `config/calibration_waypoints.yaml`. Use plain `--write` (no `--yaml-only`) only when you intend to replace **global** boresight (first site or averaged offsets).
+
+To average Sutro + QMV into global: compute mean AZ/EL from both YAML entries, then `--write` from either site with those values (or edit `axis-ptz-controller.env` manually) and verify **both** landmarks.
 
 ## Plane tracking
 
@@ -86,6 +111,7 @@ Enable waypoint mode:
 
 ```bash
 mosquitto_pub -h 127.0.0.1 -t "/skyscan/roof_sf/Manual_Override/skyscan-c2/JSON" -m '{"CalibrationWaypoint":"sutro_tower"}'
+mosquitto_pub -h 127.0.0.1 -t "/skyscan/roof_sf/Manual_Override/skyscan-c2/JSON" -m '{"CalibrationWaypoint":"mill_valley_qmv"}'
 ```
 
 Disable waypoint mode:

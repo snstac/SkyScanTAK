@@ -9,6 +9,7 @@ import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -188,9 +189,18 @@ _min_air_send_period = (
 _pytak_lock = threading.Lock()
 _pytak_loop: asyncio.AbstractEventLoop | None = None
 _pytak_tx_queue: asyncio.Queue | None = None
+_pytak_thread: threading.Thread | None = None
 _pytak_restart_lock = threading.Lock()
 _last_pytak_restart_mon = 0.0
+_pytak_restart_failures = 0
 PYTAK_RESTART_COOLDOWN_SEC = float(os.environ.get("PYTAK_RESTART_COOLDOWN_SEC", "30"))
+PYTAK_HEALTH_CHECK_INTERVAL_SEC = float(
+    os.environ.get("PYTAK_HEALTH_CHECK_INTERVAL_SEC", "10")
+)
+PYTAK_MAX_RESTART_FAILURES = max(
+    1, int(os.environ.get("PYTAK_MAX_RESTART_FAILURES", "5"))
+)
+PYTAK_HEALTHY_FILE = os.environ.get("PYTAK_HEALTHY_FILE", "/tmp/pytak_healthy")
 
 
 def _pytak_section() -> SectionProxy:
@@ -247,7 +257,32 @@ def _pytak_thread_main(ready: threading.Event, err_holder: list[Exception]) -> N
     asyncio.run(_pytak_async_main(ready, err_holder))
 
 
+def _pytak_is_healthy() -> bool:
+    with _pytak_lock:
+        thread = _pytak_thread
+        loop = _pytak_loop
+        txq = _pytak_tx_queue
+    if thread is None or not thread.is_alive():
+        return False
+    if loop is None or txq is None or loop.is_closed():
+        return False
+    return True
+
+
+def _update_pytak_health_file(healthy: bool) -> None:
+    path = PYTAK_HEALTHY_FILE
+    try:
+        if healthy:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("ok\n")
+        elif os.path.isfile(path):
+            os.remove(path)
+    except OSError as exc:
+        logging.debug("PyTAK health file update failed (%s): %s", path, exc)
+
+
 def _start_pytak_sender() -> None:
+    global _pytak_thread
     ready = threading.Event()
     errors: list[Exception] = []
     thread = threading.Thread(
@@ -257,6 +292,7 @@ def _start_pytak_sender() -> None:
         name="pytak-sender",
     )
     thread.start()
+    _pytak_thread = thread
     if not ready.wait(timeout=60.0):
         raise RuntimeError("PyTAK background thread did not become ready within 60s")
     if errors:
@@ -264,61 +300,102 @@ def _start_pytak_sender() -> None:
     with _pytak_lock:
         if _pytak_loop is None or _pytak_tx_queue is None:
             raise RuntimeError("PyTAK loop/queue not initialized")
+    _update_pytak_health_file(True)
 
 
-def _restart_pytak_sender() -> bool:
-    """Restart PyTAK when the background event loop has exited (rate-limited)."""
-    global _pytak_loop, _pytak_tx_queue, _last_pytak_restart_mon
+def _restart_pytak_sender(*, force: bool = False) -> bool:
+    """Restart PyTAK when the background thread or event loop is unhealthy."""
+    global _pytak_loop, _pytak_tx_queue, _last_pytak_restart_mon, _pytak_restart_failures
     now_m = time.monotonic()
-    if now_m - _last_pytak_restart_mon < PYTAK_RESTART_COOLDOWN_SEC:
-        return False
-    with _pytak_restart_lock:
+    thread_dead = _pytak_thread is not None and not _pytak_thread.is_alive()
+    if not force and not thread_dead:
         if now_m - _last_pytak_restart_mon < PYTAK_RESTART_COOLDOWN_SEC:
             return False
+    with _pytak_restart_lock:
+        if not force and not thread_dead:
+            if now_m - _last_pytak_restart_mon < PYTAK_RESTART_COOLDOWN_SEC:
+                return False
         with _pytak_lock:
             _pytak_loop = None
             _pytak_tx_queue = None
+        _update_pytak_health_file(False)
         try:
             _start_pytak_sender()
             _last_pytak_restart_mon = now_m
-            logging.info("PyTAK sender restarted after event loop closed")
+            _pytak_restart_failures = 0
+            logging.info("PyTAK sender restarted")
             return True
         except Exception as exc:
-            logging.error("PyTAK restart failed: %s", exc)
+            _pytak_restart_failures += 1
+            logging.error(
+                "PyTAK restart failed (%d/%d): %s",
+                _pytak_restart_failures,
+                PYTAK_MAX_RESTART_FAILURES,
+                exc,
+            )
             return False
+
+
+def _maybe_exit_after_restart_failures() -> None:
+    if _pytak_restart_failures >= PYTAK_MAX_RESTART_FAILURES:
+        logging.error(
+            "PyTAK restart failed %d times; exiting for container restart",
+            _pytak_restart_failures,
+        )
+        sys.exit(1)
+
+
+def _enqueue_cot(
+    data: bytes, loop: asyncio.AbstractEventLoop, txq: asyncio.Queue
+) -> None:
+    def _enqueue() -> None:
+        try:
+            txq.put_nowait(data)
+        except asyncio.QueueFull:
+            logging.warning("PyTAK TX queue full; dropping CoT event")
+
+    try:
+        loop.call_soon_threadsafe(_enqueue)
+    except RuntimeError as e:
+        logging.warning("PyTAK send failed (%s); dropping CoT (%d bytes)", e, len(data))
 
 
 def _send_cot(xml: str) -> None:
     data = xml.encode("utf-8")
 
-    def _put(loop: asyncio.AbstractEventLoop, txq: asyncio.Queue) -> None:
-        def _enqueue() -> None:
-            try:
-                txq.put_nowait(data)
-            except asyncio.QueueFull:
-                logging.warning("PyTAK TX queue full; dropping CoT event")
+    def _try_put() -> bool:
+        with _pytak_lock:
+            loop = _pytak_loop
+            txq = _pytak_tx_queue
+        if loop is None or txq is None or loop.is_closed():
+            return False
+        _enqueue_cot(data, loop, txq)
+        return True
 
-        try:
-            loop.call_soon_threadsafe(_enqueue)
-        except RuntimeError as e:
-            logging.warning("PyTAK send failed (%s); dropping CoT (%d bytes)", e, len(data))
+    if _try_put():
+        return
 
+    reason = "not ready"
     with _pytak_lock:
         loop = _pytak_loop
-        txq = _pytak_tx_queue
-    if loop is None or txq is None:
-        logging.warning("PyTAK not ready; dropping CoT (%d bytes)", len(data))
-        return
-    if loop.is_closed():
-        logging.warning("PyTAK event loop closed; attempting restart")
-        if _restart_pytak_sender():
-            with _pytak_lock:
-                loop = _pytak_loop
-                txq = _pytak_tx_queue
-            if loop is not None and txq is not None and not loop.is_closed():
-                _put(loop, txq)
-        return
-    _put(loop, txq)
+        if loop is not None and loop.is_closed():
+            reason = "event loop closed"
+    logging.warning("PyTAK %s; attempting restart", reason)
+    if _restart_pytak_sender():
+        _try_put()
+    else:
+        _maybe_exit_after_restart_failures()
+
+
+def _pytak_watchdog_loop(stop: threading.Event) -> None:
+    while not stop.wait(timeout=PYTAK_HEALTH_CHECK_INTERVAL_SEC):
+        if _pytak_is_healthy():
+            _update_pytak_health_file(True)
+            continue
+        logging.warning("PyTAK watchdog: connection unhealthy; attempting restart")
+        _update_pytak_health_file(False)
+        if not _restart_pytak_sender(force=True):
+            _maybe_exit_after_restart_failures()
 
 
 def _utc_cot_time(dt: datetime) -> str:
@@ -1352,6 +1429,20 @@ def main() -> None:
     cot_disp = _cot_url_for_logs(_effective_cot_url())
     logging.info("Starting PyTAK sender (COT_URL=%s)", cot_disp)
     _start_pytak_sender()
+
+    stop_pytak_wd = threading.Event()
+    pytak_wd_thread = threading.Thread(
+        target=_pytak_watchdog_loop,
+        args=(stop_pytak_wd,),
+        daemon=True,
+        name="pytak-watchdog",
+    )
+    pytak_wd_thread.start()
+    logging.info(
+        "PyTAK watchdog started (interval=%.0fs, max_failures=%d)",
+        PYTAK_HEALTH_CHECK_INTERVAL_SEC,
+        PYTAK_MAX_RESTART_FAILURES,
+    )
 
     if OBJECT_TOPIC and (COT_AIR_ENABLE or COT_TRACK_POI_ENABLE):
         logging.info(

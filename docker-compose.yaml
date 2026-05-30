@@ -96,6 +96,18 @@ services:
       # PyTAK TAK enrollment client cert + passphrase cache (~/.pytak)
       - ./data/cot-bridge-pytak:/root/.pytak
     restart: unless-stopped
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys; sys.exit(0 if open('/tmp/pytak_healthy').read().strip() else 1)",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 90s
     depends_on:
       - mqtt
       - controller

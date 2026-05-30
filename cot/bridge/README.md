@@ -6,6 +6,23 @@ Subscribes to the Axis PTZ controller **Logger** MQTT topic (`LOGGER_TOPIC` from
 
 **PTZ updates:** By default the bridge sends **two** CoT events per pose (same PyTAK destination): a **mapping-sensor** event (`SENSOR_TYPE`, `<sensor>` attributes) and a **ground FOV polygon** (`u-d-f` or mitre polyline). That supports clients that only understand one representation (e.g. WinTAK vs TAKX). Toggle with **`COT_SENSOR_ENABLE`** / **`COT_FOV_ENABLE`** in [`cot-bridge.env`](../../cot-bridge.env).
 
+## PyTAK connection recovery
+
+If the PyTAK sender thread dies or the asyncio loop becomes unhealthy, the bridge:
+
+1. **On each CoT send** — attempts an in-process restart (rate-limited by **`PYTAK_RESTART_COOLDOWN_SEC`**, default 30s).
+2. **Watchdog** — every **`PYTAK_HEALTH_CHECK_INTERVAL_SEC`** (default 10s) checks thread liveness and loop state; forces restart (bypasses cooldown).
+3. **Container restart** — after **`PYTAK_MAX_RESTART_FAILURES`** (default 5) consecutive failed restarts, the process exits so Docker **`restart: unless-stopped`** recreates the container.
+
+Docker **healthcheck** reads **`/tmp/pytak_healthy`** (written when PyTAK is healthy; override with **`PYTAK_HEALTHY_FILE`**). Unhealthy containers are restarted by compose when the file is absent.
+
+| Env | Default | Purpose |
+|-----|---------|---------|
+| **`PYTAK_RESTART_COOLDOWN_SEC`** | 30 | Min seconds between send-path restarts |
+| **`PYTAK_HEALTH_CHECK_INTERVAL_SEC`** | 10 | Watchdog poll interval |
+| **`PYTAK_MAX_RESTART_FAILURES`** | 5 | Exit process → Docker recreate |
+| **`PYTAK_HEALTHY_FILE`** | `/tmp/pytak_healthy` | Healthcheck marker file |
+
 ## Aircraft SPI / SPOI CoT
 
 When **`OBJECT_TOPIC`** is set (skyscan-c2 **Selected Object** topic from `.env`), the bridge emits an additional CoT whose **`point`** is the aircraft **lat/lon/hae** from that message.

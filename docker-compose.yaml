@@ -41,8 +41,8 @@ services:
     networks:
       - skyscan
     build:
-      context: ./cot/track_fusion
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: cot/track_fusion/Dockerfile
     restart: unless-stopped
     depends_on:
       - mqtt

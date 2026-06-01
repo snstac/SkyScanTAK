@@ -25,7 +25,7 @@ Merges **object-ledger** (ADS-B) MQTT **`ObjectLedger`** with live **CoT** track
 
 When the TAK server **reflects your own bridge CoT** onto the RX stream, **mapping-sensor / equipment / FOV / ping / POI** events can appear at the tripod with **~0 m** ground range and **win C2 sorting** before real traffic. Defaults for **`COT_LEDGER_EXCLUDE_*`** strip those so **skyscan-c2** can pick **aircraft / UAS** CoT instead.
 
-**Ground tracks:** by default **`COT_LEDGER_EXCLUDE_COT_TYPE_GLOBS`** removes MITRE-style **ground** SIDCs (third token **`G`**, e.g. **`a-f-G-U-C`**). **Air** (`a-*-A-*`) and **surface** (`a-*-S-*`) CoT rows remain in the merged ledger unless you add broader globs.
+**Ground tracks:** by default **`COT_LEDGER_EXCLUDE_COT_TYPE_GLOBS`** removes MITRE-style **ground** SIDCs (third token **`G`**, e.g. **`a-f-G-U-C`**). **Air** (`a-*-A-*`) and **surface** (`a-*-S-*`) CoT rows are the only CoT types ingested for C2 selection (see **`lib/cot_select.py`** / **`SKYSCAN_COT_ALLOW_TYPE_GLOBS`**). Bridge markers (**`b-i-v`**, **`-video`** uid suffix, equipment types) are excluded by default.
 
 ## Priority rules
 

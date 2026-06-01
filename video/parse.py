@@ -20,6 +20,8 @@ def extract_icao_hex(object_id: Any) -> str | None:
     if low.startswith("cot-icao-"):
         part = s[9:].strip()
         return part.upper() if part else None
+    if low.startswith("cot-"):
+        return None
     hex_chars = _HEX_RE.findall(s)
     if len(hex_chars) >= 6:
         return "".join(hex_chars[-6:]).upper()

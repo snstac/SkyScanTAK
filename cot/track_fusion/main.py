@@ -21,6 +21,8 @@ import pandas as pd
 import paho.mqtt.client as mqtt
 import pytak
 
+from lib.cot_select import cot_event_type_selectable
+
 _EVENT_RE = re.compile(r"<event\b[^>]*>.*?</event>", re.DOTALL | re.IGNORECASE)
 _COT_LOG_TOKEN_RE = re.compile(r"([?&]token=)[^&]*", re.IGNORECASE)
 
@@ -56,7 +58,7 @@ ADS_B_PRIORITY = float(os.environ.get("ADS_B_PRIORITY", "0"))
 def _parse_exclude_cot_types() -> frozenset[str]:
     raw = os.environ.get(
         "COT_LEDGER_EXCLUDE_COT_TYPES",
-        "b-m-p-s-p-e,a-f-G-E-S-E,u-d-f",
+        "b-m-p-s-p-e,b-i-v,a-f-G-E-S-E,u-d-f",
     ).strip()
     return frozenset(x.strip() for x in raw.split(",") if x.strip())
 
@@ -64,7 +66,7 @@ def _parse_exclude_cot_types() -> frozenset[str]:
 def _parse_exclude_uid_suffixes() -> tuple[str, ...]:
     raw = os.environ.get(
         "COT_LEDGER_EXCLUDE_UID_SUFFIXES",
-        "-ping,-fov,-poi",
+        "-ping,-fov,-poi,-video",
     ).strip()
     return tuple(x.strip().lower() for x in raw.split(",") if x.strip())
 
@@ -206,6 +208,11 @@ class CotTrackStore:
             return
 
         if _cot_ledger_ingest_excluded(uid, cot_type):
+            with self._lock:
+                self._rows.pop(oid, None)
+            return
+
+        if not cot_event_type_selectable(cot_type):
             with self._lock:
                 self._rows.pop(oid, None)
             return

@@ -20,6 +20,7 @@ import numpy as np
 import axis_ptz_utilities
 from base_mqtt_pub_sub import BaseMQTTPubSub
 from lib.calibration_waypoints import get_waypoint, waypoint_offsets
+from lib.cot_select import ledger_row_selectable
 
 
 class C2PubSub(BaseMQTTPubSub):
@@ -635,6 +636,21 @@ class C2PubSub(BaseMQTTPubSub):
                             & (object_ledger_df["min_altitude_fail"] == False)
                             & (object_ledger_df["max_altitude_fail"] == False)
                         ]
+                        if not target_ledger_df.empty:
+                            selectable = target_ledger_df.apply(
+                                lambda row: ledger_row_selectable(
+                                    str(row.get("object_type", "")),
+                                    row.get("cot_event_type"),
+                                ),
+                                axis=1,
+                            )
+                            dropped = int((~selectable).sum())
+                            if dropped:
+                                logging.debug(
+                                    "Filtered %d ledger row(s): CoT type not air/surface (a-*-A / a-*-S)",
+                                    dropped,
+                                )
+                            target_ledger_df = target_ledger_df[selectable]
 
                         # are there any objects that meet the criteria?
                         if not target_ledger_df.empty:
